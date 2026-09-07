@@ -8,9 +8,14 @@ from scipy import stats as sps
 from .base import MultiTargetBooster
 
 GAME_OBJECTIVES = {"home_win": "binary", "home_runs": "poisson", "away_runs": "poisson"}
+# Only a few thousand games per season, so keep the trees shallow and strongly regularised.
+GAME_PARAMS = {"num_leaves": 6, "max_depth": 3, "min_child_samples": 150, "feature_fraction": 0.5,
+               "learning_rate": 0.02, "lambda_l2": 15.0}
 
 
 def make_game_model(feature_cols: list[str], **kw) -> MultiTargetBooster:
+    kw.setdefault("params", GAME_PARAMS)
+    kw.setdefault("max_rounds", 3000)
     return MultiTargetBooster(feature_cols, GAME_OBJECTIVES, **kw)
 
 

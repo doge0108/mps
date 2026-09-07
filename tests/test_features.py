@@ -29,10 +29,10 @@ def test_batter_features_are_leak_free(small_dataset):
     pid = feats["player_id"].value_counts().index[0]
     lines = ds.batting_lines[ds.batting_lines["player_id"] == pid].sort_values("date").reset_index(drop=True)
     rows = feats[feats["player_id"] == pid].sort_values("date").reset_index(drop=True)
-    assert np.isnan(rows["b_h_r7"].iloc[0])  # no history before the first game
+    assert np.isnan(rows["b_h_r5"].iloc[0])  # no history before the first game
     for i in (5, 12, 30):
-        expected = lines["h"].iloc[max(0, i - 7):i].mean()
-        assert abs(rows["b_h_r7"].iloc[i] - expected) < 1e-9
+        expected = lines["h"].iloc[max(0, i - 5):i].mean()
+        assert abs(rows["b_h_r5"].iloc[i] - expected) < 1e-9
     # cumulative averages exclude the current game
     i = 25
     exp_avg = lines["h"].iloc[:i].sum() / lines["ab"].iloc[:i].sum()
@@ -68,3 +68,85 @@ def test_elo_and_team_form_are_pre_game(small_dataset):
     # mid-season games have Elo populated and centred near 1500
     mid = gf.dropna(subset=["home_tm_elo"])
     assert abs(mid["home_tm_elo"].mean() - 1500) < 25
+
+
+def test_streaks_and_form_features(small_dataset):
+    from mps.features.states import batter_state
+    ds = small_dataset
+    st = batter_state(ds.batting_lines)
+    pid = ds.batting_lines["player_id"].value_counts().index[0]
+    lines = ds.batting_lines[ds.batting_lines["player_id"] == pid].sort_values(["date", "game_pk"]).reset_index(drop=True)
+    rows = st[st["player_id"] == pid].sort_values("date").reset_index(drop=True)
+    assert len(rows) == len(lines)  # one game per day in the simulator
+    hits = (lines["h"] > 0).tolist()
+    for i in (0, 7, 19, 33):
+        streak = 0
+        for j in range(i, -1, -1):
+            if hits[j]:
+                streak += 1
+            else:
+                break
+        assert rows["b_hit_streak"].iloc[i] == streak
+        assert rows["b_hitless_streak"].iloc[i] == (0 if hits[i] else next(
+            (k for k in range(1, i + 2) if i - k < 0 or hits[i - k]), i + 1))
+    i = 40
+    exp_form = lines["tb"].iloc[i - 4:i + 1].sum() / lines["ab"].iloc[i - 4:i + 1].sum() \
+        - lines["tb"].iloc[i - 29:i + 1].sum() / lines["ab"].iloc[i - 29:i + 1].sum()
+    assert abs(rows["b_form_slg"].iloc[i] - exp_form) < 1e-9
+
+
+def test_platoon_split_state_is_keyed_by_opposing_hand(small_dataset):
+    from mps.features.states import batter_split_state, split_key
+    ds = small_dataset
+    st = batter_split_state(ds.batting_lines, ds.players)
+    throws = ds.players.set_index("player_id")["throws"]
+    lines = ds.batting_lines.assign(hand=ds.batting_lines["opp_sp_id"].map(throws))
+    pid = lines["player_id"].value_counts().index[0]
+    vs_l = lines[(lines["player_id"] == pid) & (lines["hand"] == "L")].sort_values("date")
+    assert len(vs_l) > 5
+    key = int(split_key(pd.Series([pid]), pd.Series(["L"])).iloc[0])
+    rows = st[st["split_key"] == key].sort_values("date").reset_index(drop=True)
+    assert len(rows) == len(vs_l)
+    n = min(len(vs_l), 40)
+    exp = vs_l["h"].tail(n).sum() / vs_l["ab"].tail(n).sum()
+    assert abs(rows["sp_avg"].iloc[-1] - exp) < 1e-9
+    feats = build_batter_training(ds)
+    assert feats["platoon_edge"].isin([-1.0, 1.0]).all()
+    # the batter row for a game vs a lefty uses the vs-L split from strictly earlier games
+    r = feats[(feats["player_id"] == pid) & (feats["opp_hand"] == "L")].sort_values("date").iloc[3]
+    prior = vs_l[vs_l["date"] < r["date"]]
+    assert abs(r["sp_avg"] - prior["h"].sum() / prior["ab"].sum()) < 1e-9
+
+
+def test_weather_features_encoding():
+    from mps.features.build import weather_features
+    df = pd.DataFrame({
+        "temp_f": [85, None, 60], "wind_mph": [12, None, 8],
+        "wind_dir": ["Out To CF", None, "In From LF"], "condition": ["Clear", None, "Roof Closed"],
+        "day_night": ["night", None, "day"],
+    })
+    wx = weather_features(df)
+    assert wx["wx_wind_out"].tolist()[0] == 1.0 and wx["wx_wind_out_mph"].iloc[0] == 12.0
+    assert wx["wx_wind_in"].iloc[2] == 1.0 and wx["wx_wind_in_mph"].iloc[2] == 8.0
+    assert wx["wx_dome"].tolist()[2] == 1.0 and wx["wx_dome"].iloc[0] == 0.0
+    assert wx["wx_night"].tolist()[0] == 1.0 and wx["wx_night"].iloc[2] == 0.0
+    assert wx.iloc[1].isna().all()
+
+
+def test_lineup_features_aggregate_the_nine_starters(small_dataset):
+    from mps.features.lineups import latest_lineup, lineup_features, starters_from_lines
+    ds = small_dataset
+    states = States.from_dataset(ds)
+    starters = starters_from_lines(ds.batting_lines)
+    assert starters.groupby(["game_pk", "team_id"]).size().eq(9).all()
+    lf = lineup_features(starters, states.batters, ds.players)
+    assert len(lf) == 2 * len(ds.games)
+    late = lf.merge(ds.games[["game_pk", "date"]], on="game_pk")
+    late = late[late["date"] > ds.games["date"].min() + pd.Timedelta(days=20)]
+    assert late["lu_known"].eq(9).mean() > 0.9
+    assert late["lu_lhb_share"].between(0, 1).all() and late["lu_slg_r30"].between(0.1, 0.9).all()
+    team = int(ds.games.iloc[-1]["home_team_id"])
+    fallback = latest_lineup(ds.batting_lines, team, ds.games["date"].max() + pd.Timedelta(days=1))
+    assert len(fallback) == 9 and fallback["batting_order"].tolist() == list(range(1, 10))
+    gf = build_game_training(ds, states)
+    assert {"hlu_slg_r30", "alu_lhb_share", "lu_slg_gap", "wx_temp_f", "home_tm_streak"} <= set(gf.columns)

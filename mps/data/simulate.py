@@ -25,11 +25,17 @@ LAST_NAMES = ["Judge", "Bichette", "Correa", "Swanson", "De La Cruz", "Freeman",
               "Carroll", "Rodriguez", "Semien", "Acuna", "Glasnow", "Cole", "Skubal", "Burnes", "Sale"]
 
 
+WIND_DIRS = ["Out To CF", "Out To LF", "Out To RF", "In From CF", "In From LF", "In From RF",
+             "L To R", "R To L", "Calm", "Varies"]
+DOME_TEAMS = {139, 141, 117, 109, 146, 158, 140}  # roofed parks: neutral weather
+
+
 @dataclass
 class Batter:
     player_id: int
     name: str
     team_id: int
+    bats: str
     # per-plate-appearance event probabilities
     p_k: float
     p_bb: float
@@ -46,6 +52,7 @@ class Pitcher:
     player_id: int
     name: str
     team_id: int
+    throws: str
     k_mult: float
     bb_mult: float
     hr_mult: float
@@ -101,8 +108,10 @@ class Simulator:
     def _make_batter(self, team_id: int, regular: bool, team_q: float = 0.0) -> Batter:
         g = self.rng.gauss
         quality = (-0.15 if not regular else 0.0) + 0.12 * team_q
+        u = self.rng.random()
+        bats = "L" if u < 0.35 else "S" if u < 0.45 else "R"
         return Batter(
-            player_id=self._pid(), name=self._name(), team_id=team_id,
+            player_id=self._pid(), name=self._name(), team_id=team_id, bats=bats,
             p_k=_clip(g(0.225 - quality * 0.2, 0.05), 0.08, 0.40),
             p_bb=_clip(g(0.085 + quality * 0.1, 0.025), 0.03, 0.18),
             p_hr=_clip(g(0.032 + quality * 0.06, 0.014), 0.004, 0.09),
@@ -117,6 +126,7 @@ class Simulator:
         g = self.rng.gauss
         return Pitcher(
             player_id=self._pid(), name=self._name(), team_id=team_id,
+            throws="L" if self.rng.random() < 0.28 else "R",
             k_mult=float(np.exp(g(0.08 * team_q, 0.18))),
             bb_mult=float(np.exp(g(-0.08 * team_q, 0.22))),
             hr_mult=float(np.exp(g(-0.10 * team_q, 0.25))),
@@ -187,11 +197,21 @@ class Simulator:
         return out
 
     # ---------------------------------------------------------- game sim
-    def _pa(self, batter: Batter, pitcher: Pitcher, park: Team, home_batting: bool) -> str:
+    @staticmethod
+    def platoon_edge(bats: str, throws: str) -> int:
+        """+1 when the batter has the platoon advantage, -1 when the pitcher does, 0 for switch hitters."""
+        if bats == "S":
+            return 0
+        return 1 if bats != throws else -1
+
+    def _pa(self, batter: Batter, pitcher: Pitcher, park: Team, home_batting: bool,
+            hr_env: float = 1.0) -> str:
         hit_boost = self.home_adv if home_batting else 1.0
-        p_k = batter.p_k * pitcher.k_mult
-        p_bb = batter.p_bb * pitcher.bb_mult
-        p_hr = batter.p_hr * pitcher.hr_mult * park.park_hr * hit_boost
+        edge = self.platoon_edge(batter.bats, pitcher.throws)
+        hit_boost *= 1.0 + 0.06 * edge
+        p_k = batter.p_k * pitcher.k_mult * (1.0 - 0.07 * edge)
+        p_bb = batter.p_bb * pitcher.bb_mult * (1.0 + 0.05 * edge)
+        p_hr = batter.p_hr * pitcher.hr_mult * park.park_hr * hit_boost * hr_env
         p_2b = batter.p_2b * pitcher.hit_mult * park.park_hit * hit_boost
         p_3b = batter.p_3b * pitcher.hit_mult * park.park_hit * hit_boost
         p_1b = batter.p_1b * pitcher.hit_mult * park.park_hit * hit_boost
@@ -221,7 +241,29 @@ class Simulator:
                 lineup.append(reg)
         return lineup
 
+    def _weather(self, date: pd.Timestamp, home: Team) -> tuple[dict, float]:
+        """Game-time weather and the resulting home-run environment multiplier."""
+        night = self.rng.random() < 0.7
+        if home.team_id in DOME_TEAMS and self.rng.random() < 0.8:
+            w = {"day_night": "night" if night else "day", "temp_f": 72.0, "wind_mph": 0.0,
+                 "wind_dir": "None", "condition": "Roof Closed"}
+            return w, 1.0
+        month_base = {3: 55, 4: 60, 5: 68, 6: 76, 7: 82, 8: 81, 9: 73, 10: 62}.get(date.month, 70)
+        temp = round(self.rng.gauss(month_base - (6 if night else 0), 8), 0)
+        wind = round(abs(self.rng.gauss(7, 5)), 0)
+        wind_dir = self.rng.choice(WIND_DIRS)
+        cond = self.rng.choice(["Clear", "Clear", "Sunny", "Partly Cloudy", "Cloudy", "Overcast", "Drizzle"])
+        hr_env = 1.0 + 0.004 * (temp - 70)
+        if wind_dir.startswith("Out"):
+            hr_env *= 1.0 + 0.012 * wind
+        elif wind_dir.startswith("In"):
+            hr_env *= 1.0 - 0.010 * wind
+        w = {"day_night": "night" if night else "day", "temp_f": float(temp), "wind_mph": float(wind),
+             "wind_dir": wind_dir, "condition": cond}
+        return w, max(0.6, hr_env)
+
     def _play_game(self, date: pd.Timestamp, game_pk: int, season: int, home: Team, away: Team):
+        weather, hr_env = self._weather(date, home)
         lineups = {"home": self._lineup(home), "away": self._lineup(away)}
         starters = {"home": home.rotation[home.rotation_idx % 5], "away": away.rotation[away.rotation_idx % 5]}
         home.rotation_idx += 1
@@ -277,7 +319,7 @@ class Simulator:
                     pitcher = current_pitcher[fielding]
                     bl = bat_lines[(batting, batter.player_id)]
                     pl = pit_line(fielding, pitcher)
-                    ev = self._pa(batter, pitcher, park, batting == "home")
+                    ev = self._pa(batter, pitcher, park, batting == "home", hr_env)
                     bl["pa"] += 1
                     pl["bf"] += 1
                     pl["pitches"] += 4 if ev in ("K", "BB") else 3
@@ -381,7 +423,7 @@ class Simulator:
             row = {"game_pk": game_pk, "date": date, "player_id": pid, "player_name": b.name,
                    "team_id": b.team_id,
                    "opp_team_id": away.team_id if side == "home" else home.team_id,
-                   "is_home": int(side == "home"), "batting_order": line["order"],
+                   "is_home": int(side == "home"), "batting_order": line["order"], "bat_starter": 1,
                    "opp_sp_id": starters["away" if side == "home" else "home"].player_id}
             row.update({k: line[k] for k in BATTING_STATS})
             bat_rows.append(row)
@@ -397,7 +439,7 @@ class Simulator:
                 "home_team_id": home.team_id, "away_team_id": away.team_id,
                 "home_score": score["home"], "away_score": score["away"],
                 "home_sp_id": starters["home"].player_id, "away_sp_id": starters["away"].player_id,
-                "venue_id": home.team_id, "status": "Final"}
+                "venue_id": home.team_id, "status": "Final", **weather}
         return game, bat_rows, pit_rows
 
     # ------------------------------------------------------------ driver
@@ -417,8 +459,20 @@ class Simulator:
             "games": pd.DataFrame(games),
             "batting_lines": pd.DataFrame(bats),
             "pitching_lines": pd.DataFrame(pits),
+            "players": self.players_table(),
         })
         return Dataset(**frames)
+
+    def players_table(self) -> pd.DataFrame:
+        rows = []
+        for t in self.teams.values():
+            for b in t.batters:
+                rows.append({"player_id": b.player_id, "player_name": b.name, "bats": b.bats, "throws": "R",
+                             "position": "IF", "team_id": t.team_id})
+            for p in t.rotation + t.bullpen:
+                rows.append({"player_id": p.player_id, "player_name": p.name, "bats": "R", "throws": p.throws,
+                             "position": "P", "team_id": t.team_id})
+        return pd.DataFrame(rows)
 
 
 def simulate_dataset(seasons: list[int], games_per_team: int = 162, seed: int = 7,
