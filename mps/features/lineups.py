@@ -27,7 +27,7 @@ def latest_lineup(batting_lines: pd.DataFrame, team_id: int, before: pd.Timestam
 
 
 def lineup_features(lineup_rows: pd.DataFrame, batter_state: pd.DataFrame,
-                    players: pd.DataFrame | None) -> pd.DataFrame:
+                    players: pd.DataFrame | None, sc_batter_state: pd.DataFrame | None = None) -> pd.DataFrame:
     """Aggregate pre-game batter states over each lineup.
 
     ``lineup_rows``: game_pk, date, team_id, player_id.  Returns one row per (game_pk, team_id)
@@ -38,6 +38,11 @@ def lineup_features(lineup_rows: pd.DataFrame, batter_state: pd.DataFrame,
     rows = lineup_rows[["game_pk", "date", "team_id", "player_id"]].copy()
     rows["date"] = pd.to_datetime(rows["date"])
     joined = asof_join(rows, batter_state[["player_id", "date"] + LINEUP_STATE_COLS], "player_id", "player_id")
+    if sc_batter_state is not None and not sc_batter_state.empty:
+        joined = asof_join(joined, sc_batter_state[["player_id", "date", "sc_xwoba_r30", "sc_ev_r30"]], "player_id", "player_id")
+    else:
+        joined["sc_xwoba_r30"] = np.nan
+        joined["sc_ev_r30"] = np.nan
     if players is not None and not players.empty and "bats" in players.columns:
         joined = joined.merge(players[["player_id", "bats"]], on="player_id", how="left")
     else:
@@ -50,6 +55,6 @@ def lineup_features(lineup_rows: pd.DataFrame, batter_state: pd.DataFrame,
         lu_hr_rate_r30=("b_hr_rate_r30", "mean"), lu_k_rate_r30=("b_k_rate_r30", "mean"),
         lu_bb_rate_r30=("b_bb_rate_r30", "mean"), lu_form_slg=("b_form_slg", "mean"),
         lu_lhb_share=("lhb", "mean"), lu_shb_share=("shb", "mean"), lu_known=("known", "sum"),
-        lu_size=("player_id", "count"),
+        lu_size=("player_id", "count"), lu_xwoba_r30=("sc_xwoba_r30", "mean"), lu_ev_r30=("sc_ev_r30", "mean"),
     ).reset_index()
     return agg

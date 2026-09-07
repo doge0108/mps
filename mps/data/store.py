@@ -4,24 +4,39 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
-from ..config import BATTING_STATS, GAMES_COLUMNS, LINEUPS_COLUMNS, PITCHING_STATS, PLAYERS_COLUMNS
+from ..config import (BATTING_STATS, GAMES_COLUMNS, LINEUPS_COLUMNS, PITCHING_STATS, PLAYERS_COLUMNS,
+                      STATCAST_BATTING_COLUMNS, STATCAST_PITCHING_COLUMNS)
 
-TABLES = ("games", "batting_lines", "pitching_lines", "players", "lineups")
+TABLES = ("games", "batting_lines", "pitching_lines", "players", "lineups", "statcast_batting", "statcast_pitching")
 REQUIRED = ("games", "batting_lines", "pitching_lines")
 KEYS = {
     "games": ["game_pk"], "batting_lines": ["game_pk", "player_id"], "pitching_lines": ["game_pk", "player_id"],
     "players": ["player_id"], "lineups": ["game_pk", "player_id"],
+    "statcast_batting": ["game_pk", "player_id"], "statcast_pitching": ["game_pk", "player_id"],
 }
 
 
+def _empty(cols: list[str]) -> pd.DataFrame:
+    return pd.DataFrame({c: pd.Series(dtype="object") for c in cols})
+
+
 def empty_players() -> pd.DataFrame:
-    return pd.DataFrame({c: pd.Series(dtype="object") for c in PLAYERS_COLUMNS})
+    return _empty(PLAYERS_COLUMNS)
 
 
 def empty_lineups() -> pd.DataFrame:
-    return pd.DataFrame({c: pd.Series(dtype="object") for c in LINEUPS_COLUMNS})
+    return _empty(LINEUPS_COLUMNS)
+
+
+def empty_statcast_batting() -> pd.DataFrame:
+    return _empty(STATCAST_BATTING_COLUMNS)
+
+
+def empty_statcast_pitching() -> pd.DataFrame:
+    return _empty(STATCAST_PITCHING_COLUMNS)
 
 
 @dataclass
@@ -31,6 +46,8 @@ class Dataset:
     pitching_lines: pd.DataFrame
     players: pd.DataFrame = field(default_factory=empty_players)
     lineups: pd.DataFrame = field(default_factory=empty_lineups)
+    statcast_batting: pd.DataFrame = field(default_factory=empty_statcast_batting)
+    statcast_pitching: pd.DataFrame = field(default_factory=empty_statcast_pitching)
 
     def seasons(self) -> list[int]:
         played = self.games[self.games["home_score"].notna()]
@@ -82,6 +99,7 @@ def normalise(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         games[col] = pd.to_numeric(games[col], errors="coerce").astype("Int64")
     for col in ("temp_f", "wind_mph"):
         games[col] = pd.to_numeric(games[col], errors="coerce").astype("float64")
+    games["hp_umpire_id"] = pd.to_numeric(games["hp_umpire_id"], errors="coerce").astype("Int64")
     games = games.sort_values(["date", "game_pk"]).reset_index(drop=True)
 
     bat = frames["batting_lines"].copy()
@@ -116,6 +134,7 @@ def normalise(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
             players[col] = pd.NA
     if len(players):
         players["player_id"] = pd.to_numeric(players["player_id"], errors="coerce").astype("int64")
+        players["birth_date"] = pd.to_datetime(players["birth_date"], errors="coerce")
         players = players.drop_duplicates("player_id", keep="last").reset_index(drop=True)
 
     lineups = frames.get("lineups")
@@ -128,4 +147,23 @@ def normalise(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         for col in ("game_pk", "team_id", "player_id", "batting_order"):
             lineups[col] = pd.to_numeric(lineups[col], errors="coerce").astype("int64")
         lineups = lineups.sort_values(["date", "game_pk", "team_id", "batting_order"]).reset_index(drop=True)
-    return {"games": games, "batting_lines": bat, "pitching_lines": pit, "players": players, "lineups": lineups}
+    sc_bat = _normalise_statcast(frames.get("statcast_batting"), STATCAST_BATTING_COLUMNS)
+    sc_pit = _normalise_statcast(frames.get("statcast_pitching"), STATCAST_PITCHING_COLUMNS)
+    return {"games": games, "batting_lines": bat, "pitching_lines": pit, "players": players, "lineups": lineups,
+            "statcast_batting": sc_bat, "statcast_pitching": sc_pit}
+
+
+def _normalise_statcast(df: pd.DataFrame | None, cols: list[str]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return _empty(cols)
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            df[col] = np.nan
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+    for col in cols:
+        if col not in ("date",):
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
+    df["game_pk"] = df["game_pk"].astype("int64")
+    df["player_id"] = df["player_id"].astype("int64")
+    return df[cols].sort_values(["date", "game_pk", "player_id"]).reset_index(drop=True)

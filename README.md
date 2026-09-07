@@ -13,8 +13,13 @@ game you ask about:
   last 3–5 games vs. a 30-game baseline), announced lineups and batting-order
   slot, platoon splits (batter side vs. starter hand, with the batter's own
   rolling split against that hand), opposing lineup strength and handedness
-  mix, park factor, and game-time weather (temperature, wind in/out, dome,
-  day/night).
+  mix, park factor, game-time weather (temperature, wind in/out, dome,
+  day/night), **Statcast quality of contact** (exit velocity, hard-hit and
+  barrel rates, expected BA / wOBA, whiff and chase rates; pitcher velocity
+  trend, CSW, contact allowed), **Marcel-style preseason projections with
+  age**, the **home-plate umpire's** strikeout / walk tendencies, and
+  **bullpen fatigue** (arms and pitches used in recent games, back-to-back
+  appearances, top relievers used yesterday).
 
 Models are LightGBM gradient-boosted trees (Poisson objectives for counts,
 logistic for win probability) trained on leak-free rolling features.
@@ -24,9 +29,10 @@ logistic for win probability) trained on leak-free rolling features.
 ```bash
 pip install -e ".[dev]"
 
-# Option A: real data from the free MLB Stats API (no key required).
+# Option A: real data from the free MLB Stats API + Baseball Savant (no keys).
 # An in-progress season is fine: you get everything played so far.
-mps fetch 2024 2025 2026
+# More history = better career rates and projections; 2018 onward is a good start.
+mps fetch 2018-2026
 
 # Option B: no network? generate realistic simulated seasons instead
 mps simulate 2022 2023 2024
@@ -52,9 +58,10 @@ mps predict-game      # defaults to today
 
 `mps update` is incremental and safe to run every day.  It stores upcoming
 games with their probable pitchers, **announced lineups** (as soon as MLB posts
-them, usually a few hours before first pitch) and the **weather forecast** from
-the live feed, so predictions for today's games use the real matchup.  Once a
-game finishes, the next update replaces the placeholder with its box score.
+them, usually a few hours before first pitch), the **home-plate umpire** and the
+**weather forecast** from the live feed, plus new Statcast data, so predictions
+for today's games use the real matchup.  Once a game finishes, the next update
+replaces the placeholder with its box score.
 
 For a game that is not stored yet, add `--live` to pull that day's schedule
 from the API on the fly, or pass the matchup by hand with `--opponent BOS
@@ -63,11 +70,16 @@ from the API on the fly, or pass the matchup by hand with `--opponent BOS
 Example output:
 
 ```
-Julio Tucker (NYY) vs BOS on 2024-10-06  [context: schedule]
+Julio Tucker (NYY) vs BOS on 2024-09-30  [context: schedule]
   Weather: 88F, wind 14mph Out To CF, Clear
+  Umpire: Ump Luis Betts -- K rate +0.012, BB rate -0.004 vs league over 81 games
+  Opposing bullpen: 3 arms / 52 pitches last game, 141 pitches over last 3, 1 arms on back-to-back days, 2/3 top relievers used yesterday
   Opposing starter: Vlad Correa (LHP)
   Lineup: batting 4 (announced lineup)
   Platoon: bats R, platoon advantage, vs LHP last 40 g: AVG 0.193 SLG 0.340
+  Age 27.3; preseason projection AVG 0.262 SLG 0.451 HR/PA 0.038 (reliability 0.71)
+  Contact (Statcast): EV 88.9 mph (last 5 g 90.4, form +1.5), hard-hit 34%, barrel 5.1%, xwOBA 0.190, whiff 33%, chase 26%
+  Opposing starter stuff: FB 92.8 mph (last start 92.1, -0.70 vs season), whiff 35%, CSW 37%, EV allowed 86.9, barrel allowed 2.7%
   Form: STEADY -- last 5 g: 3-for-19, 1 HR, 5 RBI, AVG 0.158 SLG 0.316 (30-g baseline AVG 0.162 SLG 0.252); hit streak 1, hitless streak 0, HR drought 4 g
   Expected line: H 0.85, HR 0.18, RBI 0.41, R 0.43, BB 0.25, SO 1.35, SB 0.02, TB 1.56, AB 3.82
   Probabilities: hit 57%, multi_hit 21%, home_run 16%, rbi 33%, run 35%, walk 22%, stolen_base 2%, strikeout 74%
@@ -87,19 +99,28 @@ lineup, `prev` = the team's previous game (fallback).
 MLB Stats API / simulator
         │  games.csv, batting_lines.csv, pitching_lines.csv   (mps/data)
         ▼
-state tables  (mps/features/states.py)
+state tables  (mps/features/states.py, mps/features/priors.py)
   batter_state   rolling 3/5/15/30/60-game averages, cumulative rates, hot/cold form
                  deltas (last 5 vs last 30), hit / hitless / HR-drought streaks, rest days
   split_state    rolling performance vs LHP and vs RHP separately (platoon splits)
   pitcher_state  rolling 3/5/10/30-appearance K%, BB%, HR%, ERA, form deltas, QS streak
-  team_state     rolling 5/10/30/162-game form, W/L streak, Elo, park factor, bullpen ERA
+  statcast       batters: EV, hard-hit, barrel, xBA, xwOBA, whiff, chase (5/15/30/60 g)
+                 pitchers: fastball velocity + trend, whiff, CSW, EV / barrel / xwOBA allowed
+  priors         Marcel projection per season (5/4/3 weights, regression, aging) + age
+  umpire_state   home-plate umpire K / BB rates vs league over last 30/100 games
+  team_state     rolling 5/10/30/162-game form, W/L streak, Elo, park factor, bullpen ERA,
+                 bullpen workload (pitches / arms last game and last 3, back-to-back arms,
+                 top-3 relievers used)
         │  as-of join: only states dated strictly BEFORE the game are used
         ▼
 feature matrices (mps/features/build.py, mps/features/lineups.py)
-  batter row  = own form + platoon edge & split vs starter hand + opposing starter
-                + own/opposing team + home/order + weather
-  pitcher row = own form + opposing lineup strength & handedness mix + teams + weather
-  game row    = both teams' form/Elo/park + both starters + both lineups + weather
+  batter row  = own form + Statcast + prior + age + platoon edge & split vs starter hand
+                + opposing starter (form, stuff, prior) + teams (incl. opp bullpen fatigue)
+                + umpire + home/order + weather
+  pitcher row = own form + stuff + prior + age + opposing lineup strength / handedness /
+                xwOBA + teams + umpire + weather
+  game row    = both teams' form/Elo/park/bullpen fatigue + both starters (form, stuff,
+                prior) + both lineups + umpire + weather
         ▼
 LightGBM boosters (mps/models)
   batter:  Poisson per stat (h, hr, rbi, r, bb, so, sb, tb, ab)
@@ -123,13 +144,19 @@ public MLB Stats API (`statsapi.mlb.com`), caches the raw JSON under
 | `games`          | game                 | date, teams, score, starters, day/night, temp, wind, condition|
 | `batting_lines`  | batter × game        | pa, ab, r, h, 2b, 3b, hr, rbi, bb, so, sb, hbp, tb, order     |
 | `pitching_lines` | pitcher × game       | outs, h, r, er, bb, so, hr, batters faced, pitches            |
-| `players`        | player               | name, bats, throws, position, current team                    |
+| `players`        | player               | name, bats, throws, position, current team, birth date        |
 | `lineups`        | announced slot       | game, team, player, batting order (upcoming games only)       |
+| `statcast_batting`  | batter × game     | pitches, swings, whiffs, chases, balls in play, EV sum/max, hard-hit, barrels, xBA/xwOBA sums |
+| `statcast_pitching` | pitcher × game    | pitches, fastballs, velocity sum/max, spin, whiffs, called strikes, contact allowed |
 
 Endpoints used: `schedule` (with `probablePitcher` and `lineups` hydration),
-`game/{pk}/boxscore`, `game/{pk}/feed/live` (weather only, via a field filter),
-and `sports/1/players` (handedness).  Add `--no-weather` to skip the per-game
-weather request if you want a faster first download.
+`game/{pk}/boxscore`, `game/{pk}/feed/live` (weather and officials only, via a
+field filter), `sports/1/players` (handedness, birth date), and Baseball
+Savant's `statcast_search/csv` (pitch level, fetched in 3-day windows and
+reduced to per-game aggregates).  `--no-weather` and `--no-statcast` skip the
+extra requests for a faster first download; `mps statcast 2018-2026` backfills
+Statcast for stored seasons later.  The `games` table also stores the
+home-plate umpire.
 
 `mps simulate` produces the same tables from a plate-appearance level
 simulator with latent batter/pitcher/park/team skills.  It is meant for
@@ -164,7 +191,9 @@ mps/
   data/ingest.py       season download -> CSV tables
   data/simulate.py     offline season simulator
   data/store.py        Dataset load/save/concat
-  features/states.py   rolling state tables + as-of join
+  data/statcast.py     Baseball Savant client + pitch -> per-game aggregation
+  features/states.py   rolling state tables (players, teams, Statcast, umpires, bullpen) + as-of join
+  features/priors.py   Marcel-style projections and age
   features/build.py    feature assembly for batters / pitchers / games
   models/base.py       multi-target LightGBM wrapper (time-based early stopping)
   models/*_model.py    objectives and post-processing per model family
@@ -186,4 +215,5 @@ tests/                 pytest suite (API parsing, simulator, features, end-to-en
   previous starting nine.
 * Weather for upcoming games is whatever the live feed reports at update time;
   run `mps update` again closer to first pitch for fresher forecasts and lineups.
-* Injuries and bullpen usage on the day are not modelled.
+* Statcast data starts in 2015; seasons before that simply have NaN contact
+  features.  Injuries are not modelled beyond what lineups and velocity trends reveal.

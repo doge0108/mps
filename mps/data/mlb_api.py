@@ -33,7 +33,10 @@ _PITCHING_MAP = {
     "hits": "h", "runs": "r", "earnedRuns": "er", "baseOnBalls": "bb", "strikeOuts": "so",
     "homeRuns": "hr", "battersFaced": "bf", "numberOfPitches": "pitches",
 }
-WEATHER_FIELDS = "gameData,weather,condition,temp,wind,datetime,dayNight"
+# ``fields`` filter for the live feed: weather + time of day + officials (home-plate umpire)
+GAME_META_FIELDS = ("gameData,weather,condition,temp,wind,datetime,dayNight,"
+                    "liveData,boxscore,officials,official,id,fullName,officialType")
+WEATHER_FIELDS = GAME_META_FIELDS
 
 
 def innings_to_outs(ip: str | float | None) -> int:
@@ -123,10 +126,12 @@ class MLBStatsClient:
         return self.get(f"game/{game_pk}/boxscore", cache_key=f"boxscore_{game_pk}" if final else None)
 
     def weather(self, game_pk: int, final: bool = True) -> dict:
-        """Weather / time-of-day block from the live feed (small thanks to the ``fields`` filter)."""
-        payload = self.get(f"game/{game_pk}/feed/live", {"fields": WEATHER_FIELDS},
+        """Weather, time of day and home-plate umpire from the live feed (small thanks to ``fields``)."""
+        payload = self.get(f"game/{game_pk}/feed/live", {"fields": GAME_META_FIELDS},
                            cache_key=f"weather_{game_pk}" if final else None, base=BASE_URL_V11)
-        return parse_weather(payload)
+        return {**parse_weather(payload), **parse_umpire(payload)}
+
+    game_meta = weather
 
     def teams(self, season: int | None = None) -> list[dict]:
         params: dict[str, Any] = {"sportId": 1}
@@ -155,9 +160,20 @@ def parse_players(payload: dict) -> list[dict]:
             "throws": (p.get("pitchHand") or {}).get("code"),
             "position": (p.get("primaryPosition") or {}).get("abbreviation"),
             "team_id": (p.get("currentTeam") or {}).get("id"),
+            "birth_date": p.get("birthDate"),
         }
         for p in payload.get("people", [])
     ]
+
+
+def parse_umpire(payload: dict) -> dict:
+    """Home-plate umpire from the live feed's officials list (empty until the crew is posted)."""
+    officials = ((payload.get("liveData") or {}).get("boxscore") or {}).get("officials") or []
+    for o in officials:
+        if str(o.get("officialType", "")).lower().startswith("home plate"):
+            person = o.get("official") or {}
+            return {"hp_umpire_id": person.get("id"), "hp_umpire_name": person.get("fullName")}
+    return {"hp_umpire_id": None, "hp_umpire_name": None}
 
 
 def parse_schedule(payload: dict) -> list[dict]:

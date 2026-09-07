@@ -66,7 +66,8 @@ class MultiTargetBooster:
         return self
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
-        X = df[self.feature_cols].astype("float32")
+        # columns the model never saw are dropped; columns missing now (e.g. no Statcast yet) become NaN
+        X = df.reindex(columns=self.feature_cols).astype("float32")
         out = {}
         for target, booster in self.boosters.items():
             out[target] = booster.predict(X, num_iteration=self.best_iters[target])
