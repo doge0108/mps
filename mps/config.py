@@ -20,7 +20,13 @@ GAMES_COLUMNS = [
     "game_pk", "date", "season", "game_type",
     "home_team_id", "away_team_id", "home_score", "away_score",
     "home_sp_id", "away_sp_id", "venue_id", "status",
+    # weather / time of day (NaN when unknown)
+    "day_night", "temp_f", "wind_mph", "wind_dir", "condition",
 ]
+PLAYERS_COLUMNS = ["player_id", "player_name", "bats", "throws", "position", "team_id"]
+LINEUPS_COLUMNS = ["game_pk", "date", "team_id", "player_id", "batting_order"]
+
+HAND_CODES = {"L": 1, "R": 2, "S": 3}
 
 # MLB Stats API team ids -> (abbreviation, name).  Used for both real and simulated data.
 TEAMS: dict[int, tuple[str, str]] = {

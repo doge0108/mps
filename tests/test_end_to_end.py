@@ -82,3 +82,40 @@ def test_cli_simulate_train_predict(tmp_path, capsys):
     assert payload["player_id"] == int(pid) and "batting" in payload
     assert main(["predict-game", "--date", date, "--data-dir", str(data_dir), "--models-dir", str(models_dir)]) == 0
     assert "home_win_prob" in capsys.readouterr().out
+
+
+def test_predict_upcoming_game_with_announced_lineup(trained, small_dataset):
+    ds = small_dataset
+    tomorrow = ds.games["date"].max() + pd.Timedelta(days=1)
+    g = ds.games.iloc[-1]
+    upcoming = pd.DataFrame([{
+        "game_pk": 555001, "date": tomorrow, "season": 2024, "game_type": "R",
+        "home_team_id": g["home_team_id"], "away_team_id": g["away_team_id"],
+        "home_score": None, "away_score": None, "home_sp_id": None, "away_sp_id": None,
+        "venue_id": g["home_team_id"], "status": "Preview",
+        "day_night": "day", "temp_f": 95.0, "wind_mph": 15.0, "wind_dir": "Out To CF", "condition": "Sunny",
+    }])
+    home_bats = ds.batting_lines[ds.batting_lines["team_id"] == g["home_team_id"]]
+    last9 = home_bats[home_bats["game_pk"] == home_bats.sort_values("date")["game_pk"].iloc[-1]]
+    last9 = last9.sort_values("batting_order")["player_id"].tolist()[:9]
+    lineup = pd.DataFrame([{"game_pk": 555001, "date": tomorrow, "team_id": g["home_team_id"],
+                            "player_id": pid, "batting_order": 9 - i} for i, pid in enumerate(last9)])
+    from mps.data.store import Dataset
+    ds2 = ds.concat(Dataset(games=upcoming, batting_lines=ds.batting_lines.iloc[:0],
+                            pitching_lines=ds.pitching_lines.iloc[:0], lineups=lineup))
+    pred = Predictor(ds=ds2, models=ModelBundle.load(trained))
+    leadoff_last_game = last9[0]
+    out = pred.predict_player(str(leadoff_last_game), tomorrow)
+    b = out["batting"]
+    assert out["context_source"] == "schedule" and out["weather"]["temp_f"] == 95.0
+    assert b["lineup"] == {"source": "announced", "in_lineup": True}
+    assert b["batting_order"] == 9  # announced slot overrides the last-game slot
+    assert b["bats"] in ("L", "R", "S") and b["opposing_starter_hand"] in ("L", "R")
+    assert b["form"]["label"] in ("hot", "cold", "steady") and b["form"]["last5"]["games"] == 5
+    assert b["split_vs_hand"] is not None and 0 <= b["split_vs_hand"]["avg"] <= 1
+    # a player who is not in the announced lineup is flagged
+    bench = home_bats[~home_bats["player_id"].isin(last9)]["player_id"].iloc[0]
+    assert pred.predict_player(str(int(bench)), tomorrow)["batting"]["lineup"]["in_lineup"] is False
+    table = pred.predict_games(tomorrow)
+    assert len(table) == 1 and table["lineups"].iloc[0] == "anno/prev"
+    assert "95F" in table["weather"].iloc[0] and table["home_sp"].iloc[0] is not None

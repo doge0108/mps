@@ -11,15 +11,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ..config import BATTING_STATS, PITCHING_STATS
+from ..config import HAND_CODES
 from .common import safe_div
 from .team_features import ELO_HOME, ELO_K, ELO_SEASON_REGRESS, ELO_START, team_game_log
 
 BATTER_ROLL_COLS = ["pa", "ab", "h", "hr", "rbi", "r", "bb", "so", "sb", "tb", "d"]
-BATTER_WINDOWS = (7, 15, 30, 60)
+BATTER_WINDOWS = (3, 5, 15, 30, 60)
+SPLIT_WINDOW = 40          # games vs. same-handed starters used for platoon splits
 PITCHER_ROLL_COLS = ["outs", "h", "er", "bb", "so", "hr", "bf", "pitches"]
-PITCHER_WINDOWS = (5, 10, 30)
-TEAM_WINDOWS = (10, 30, 162)
+PITCHER_WINDOWS = (3, 5, 10, 30)
+TEAM_WINDOWS = (5, 10, 30, 162)
 
 
 def _rolling_inclusive(df: pd.DataFrame, by: str, cols: list[str], window: int, prefix: str) -> pd.DataFrame:
@@ -29,9 +30,20 @@ def _rolling_inclusive(df: pd.DataFrame, by: str, cols: list[str], window: int, 
     return out
 
 
+def _streak(flag: pd.Series, by: pd.Series) -> pd.Series:
+    """Length of the current run of True values within each group (inclusive of the row)."""
+    flag = flag.astype(bool)
+    block = (~flag).groupby(by).cumsum()
+    return flag.groupby([by, block]).cumsum().astype(float)
+
+
 def _collapse_same_day(state: pd.DataFrame, key: str) -> pd.DataFrame:
     """Keep the last row per (key, date) so doubleheaders yield one state per day."""
     return state.drop_duplicates(subset=[key, "date"], keep="last").reset_index(drop=True)
+
+
+def hand_code(series: pd.Series) -> pd.Series:
+    return series.map(HAND_CODES).astype("float")
 
 
 # ---------------------------------------------------------------- batters
@@ -46,10 +58,9 @@ def batter_state(batting_lines: pd.DataFrame) -> pd.DataFrame:
     cum.columns = [f"b_{c}_cum" for c in BATTER_ROLL_COLS]
     parts.append(cum)
     st = pd.concat(parts, axis=1)
-    st["b_games"] = grp.cumcount() + 1
+    st["b_games"] = (grp.cumcount() + 1).clip(upper=150)
     st["b_last_date"] = df["date"]
-    # derived rates from the 30 / 60 game windows and cumulative totals
-    for w in (30, 60):
+    for w in (5, 15, 30, 60):
         st[f"b_avg_r{w}"] = safe_div(st[f"b_h_r{w}"], st[f"b_ab_r{w}"])
         st[f"b_hr_rate_r{w}"] = safe_div(st[f"b_hr_r{w}"], st[f"b_pa_r{w}"])
         st[f"b_bb_rate_r{w}"] = safe_div(st[f"b_bb_r{w}"], st[f"b_pa_r{w}"])
@@ -61,12 +72,52 @@ def batter_state(batting_lines: pd.DataFrame) -> pd.DataFrame:
     st["b_k_rate_cum"] = safe_div(st["b_so_cum"], st["b_pa_cum"])
     st["b_bb_rate_cum"] = safe_div(st["b_bb_cum"], st["b_pa_cum"])
     st["b_slg_cum"] = safe_div(st["b_tb_cum"], st["b_ab_cum"])
-    # raw cumulative counts are non-stationary (they only grow with the size of the
-    # dataset) so keep the rates and a capped experience count only
-    st["b_games"] = st["b_games"].clip(upper=150)
+    # --- form: hot / cold relative to the batter's own 30-game baseline
+    st["b_form_avg"] = st["b_avg_r5"] - st["b_avg_r30"]
+    st["b_form_slg"] = st["b_slg_r5"] - st["b_slg_r30"]
+    st["b_form_k"] = st["b_k_rate_r5"] - st["b_k_rate_r30"]
+    st["b_form_hr"] = st["b_hr_rate_r5"] - st["b_hr_rate_r30"]
+    st["b_form_tb3"] = st["b_tb_r3"] - st["b_tb_r30"]
+    st["b_hit_streak"] = _streak(df["h"] > 0, df["player_id"])
+    st["b_hitless_streak"] = _streak(df["h"] == 0, df["player_id"])
+    st["b_hr_drought"] = _streak(df["hr"] == 0, df["player_id"])
+    st["b_multi_hit_r5"] = _rolling_inclusive(df.assign(mh=(df["h"] >= 2).astype(float)), "player_id",
+                                              ["mh"], 5, "x_")["x_mh_r5"]
+    # raw cumulative counts are non-stationary, keep only rates
     st = st.drop(columns=[f"b_{c}_cum" for c in BATTER_ROLL_COLS])
     st = st.sort_values(["date", "player_id"]).reset_index(drop=True)
     return _collapse_same_day(st, "player_id")
+
+
+def batter_split_state(batting_lines: pd.DataFrame, players: pd.DataFrame) -> pd.DataFrame:
+    """Rolling performance vs. left- and right-handed starters, keyed by (player_id, opp hand)."""
+    if players is None or players.empty or "throws" not in players.columns:
+        return pd.DataFrame(columns=["split_key", "date"])
+    hands = players[["player_id", "throws"]].rename(columns={"player_id": "opp_sp_id", "throws": "opp_hand"})
+    df = batting_lines.merge(hands, on="opp_sp_id", how="inner")
+    df = df[df["opp_hand"].isin(["L", "R"])].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["split_key", "date"])
+    df["split_key"] = split_key(df["player_id"], df["opp_hand"])
+    df = df.sort_values(["split_key", "date", "game_pk"]).reset_index(drop=True)
+    cols = ["pa", "ab", "h", "hr", "bb", "so", "tb"]
+    roll = _rolling_inclusive(df, "split_key", cols, SPLIT_WINDOW, "sp_")
+    st = pd.concat([df[["split_key", "date"]], roll], axis=1)
+    st["sp_games"] = (df.groupby("split_key", sort=False).cumcount() + 1).clip(upper=SPLIT_WINDOW).astype(float)
+    st["sp_avg"] = safe_div(st[f"sp_h_r{SPLIT_WINDOW}"], st[f"sp_ab_r{SPLIT_WINDOW}"])
+    st["sp_slg"] = safe_div(st[f"sp_tb_r{SPLIT_WINDOW}"], st[f"sp_ab_r{SPLIT_WINDOW}"])
+    st["sp_hr_rate"] = safe_div(st[f"sp_hr_r{SPLIT_WINDOW}"], st[f"sp_pa_r{SPLIT_WINDOW}"])
+    st["sp_k_rate"] = safe_div(st[f"sp_so_r{SPLIT_WINDOW}"], st[f"sp_pa_r{SPLIT_WINDOW}"])
+    st["sp_bb_rate"] = safe_div(st[f"sp_bb_r{SPLIT_WINDOW}"], st[f"sp_pa_r{SPLIT_WINDOW}"])
+    st = st.drop(columns=[f"sp_{c}_r{SPLIT_WINDOW}" for c in cols])
+    st = st.sort_values(["date", "split_key"]).reset_index(drop=True)
+    return _collapse_same_day(st, "split_key")
+
+
+def split_key(player_id: pd.Series, hand: pd.Series) -> pd.Series:
+    """Composite as-of key: player_id * 4 + hand code (L=1, R=2)."""
+    code = pd.Series(hand).map({"L": 1, "R": 2}).fillna(0).astype("int64")
+    return pd.to_numeric(player_id, errors="coerce").fillna(-1).astype("int64") * 4 + code.to_numpy()
 
 
 # --------------------------------------------------------------- pitchers
@@ -81,11 +132,11 @@ def pitcher_state(pitching_lines: pd.DataFrame) -> pd.DataFrame:
     cum.columns = [f"p_{c}_cum" for c in PITCHER_ROLL_COLS]
     parts.append(cum)
     st = pd.concat(parts, axis=1)
-    st["p_apps"] = grp.cumcount() + 1
-    st["p_starts"] = grp["is_starter"].cumsum()
+    st["p_apps"] = (grp.cumcount() + 1).clip(upper=60)
+    st["p_starts"] = grp["is_starter"].cumsum().clip(upper=40)
     st["p_start_share_r10"] = _rolling_inclusive(df, "player_id", ["is_starter"], 10, "x_")["x_is_starter_r10"]
     st["p_last_date"] = df["date"]
-    for w in (10, 30):
+    for w in (3, 5, 10, 30):
         st[f"p_k_rate_r{w}"] = safe_div(st[f"p_so_r{w}"], st[f"p_bf_r{w}"])
         st[f"p_bb_rate_r{w}"] = safe_div(st[f"p_bb_r{w}"], st[f"p_bf_r{w}"])
         st[f"p_hr_rate_r{w}"] = safe_div(st[f"p_hr_r{w}"], st[f"p_bf_r{w}"])
@@ -95,8 +146,11 @@ def pitcher_state(pitching_lines: pd.DataFrame) -> pd.DataFrame:
     st["p_bb_rate_cum"] = safe_div(st["p_bb_cum"], st["p_bf_cum"])
     st["p_hr_rate_cum"] = safe_div(st["p_hr_cum"], st["p_bf_cum"])
     st["p_era_cum"] = safe_div(st["p_er_cum"] * 27.0, st["p_outs_cum"])
-    st["p_apps"] = st["p_apps"].clip(upper=60)
-    st["p_starts"] = st["p_starts"].clip(upper=40)
+    # form vs. own baseline
+    st["p_form_era"] = st["p_era_r3"] - st["p_era_r30"]
+    st["p_form_k"] = st["p_k_rate_r3"] - st["p_k_rate_r30"]
+    st["p_form_outs"] = st["p_outs_r3"] - st["p_outs_r30"]
+    st["p_qs_streak"] = _streak((df["outs"] >= 18) & (df["er"] <= 3), df["player_id"])
     st = st.drop(columns=[f"p_{c}_cum" for c in PITCHER_ROLL_COLS])
     st = st.sort_values(["date", "player_id"]).reset_index(drop=True)
     return _collapse_same_day(st, "player_id")
@@ -131,7 +185,7 @@ def _post_game_elo(games: pd.DataFrame) -> pd.DataFrame:
 
 
 def team_state(games: pd.DataFrame, pitching_lines: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Post-game team state: form, Elo, park factor, bullpen quality, last game date."""
+    """Post-game team state: form, streak, Elo, park factor, bullpen quality, last game date."""
     played = games[games["home_score"].notna() & games["away_score"].notna()]
     log = team_game_log(played)
     log = log.sort_values(["team_id", "date", "game_pk"]).reset_index(drop=True)
@@ -141,7 +195,9 @@ def team_state(games: pd.DataFrame, pitching_lines: pd.DataFrame | None = None) 
     st = pd.concat(parts, axis=1)
     st["tm_games"] = (log.groupby("team_id", sort=False).cumcount() + 1).clip(upper=162)
     st["tm_last_date"] = log["date"]
-    # park factor: total runs in the team's home games relative to league average (last 81 home games)
+    win_streak = _streak(log["win"] == 1, log["team_id"])
+    loss_streak = _streak(log["win"] == 0, log["team_id"])
+    st["tm_streak"] = win_streak - loss_streak  # +3 = won three straight, -2 = lost two straight
     league_avg = log["total_runs"].mean()
     is_home = log["is_home"] == 1
     home_tr = log["total_runs"].where(is_home)
@@ -150,7 +206,6 @@ def team_state(games: pd.DataFrame, pitching_lines: pd.DataFrame | None = None) 
     st["tm_park_factor"] = (home_roll / league_avg).to_numpy()
     st = st.merge(_post_game_elo(played), on=["game_pk", "team_id"], how="left")
     if pitching_lines is not None and len(pitching_lines):
-        # bullpen ERA / K-rate: relievers only, last 30 team games
         rp = pitching_lines[pitching_lines["is_starter"] == 0]
         agg = rp.groupby(["team_id", "game_pk"], sort=False)[["outs", "er", "so", "bf"]].sum().reset_index()
         agg = agg.merge(log[["team_id", "game_pk", "date"]], on=["team_id", "game_pk"], how="inner")
@@ -179,9 +234,13 @@ def asof_join(left: pd.DataFrame, state: pd.DataFrame, left_key: str, state_key:
     left = left.copy()
     left["_order"] = np.arange(len(left))
     left["_key"] = pd.to_numeric(left[left_key], errors="coerce").fillna(-1).astype("int64")
+    feat_cols = [c for c in state.columns if c not in (state_key, "date", "_key")]
+    if state.empty:
+        for c in feat_cols:
+            left[f"{prefix}{c}"] = np.nan
+        return left.drop(columns=["_order", "_key"])
     st = state.copy()
     st["_key"] = st[state_key].astype("int64")
-    feat_cols = [c for c in st.columns if c not in (state_key, "date", "_key")]
     if prefix:
         st = st.rename(columns={c: f"{prefix}{c}" for c in feat_cols})
         feat_cols = [f"{prefix}{c}" for c in feat_cols]
