@@ -61,11 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("train", help="train batter, pitcher and game models on all stored data")
     p.add_argument("--max-rounds", type=int, default=1500)
+    p.add_argument("--no-stack", action="store_true", help="skip the bottom-up (stacked) game features")
     _add_dirs(p)
 
     p = sub.add_parser("evaluate", help="backtest: train on earlier seasons, test on the latest")
     p.add_argument("--test-season", type=int, default=None)
     p.add_argument("--max-rounds", type=int, default=800)
+    p.add_argument("--no-stack", action="store_true", help="skip the bottom-up (stacked) game features")
     p.add_argument("--report", type=Path, default=None, help="write JSON report here")
     _add_dirs(p)
 
@@ -189,7 +191,7 @@ def cmd_train(args) -> int:
     from .models.registry import train_all
     ds = Dataset.load(args.data_dir)
     print(f"Training on seasons {ds.seasons()} ({len(ds.games)} games)")
-    bundle = train_all(ds, max_rounds=args.max_rounds)
+    bundle = train_all(ds, max_rounds=args.max_rounds, stack=not args.no_stack)
     bundle.save(args.models_dir)
     print(f"Saved models to {args.models_dir}")
     return 0
@@ -199,7 +201,7 @@ def cmd_evaluate(args) -> int:
     from .data.store import Dataset
     from .models.evaluate import backtest, format_report, save_report
     ds = Dataset.load(args.data_dir)
-    report = backtest(ds, args.test_season, max_rounds=args.max_rounds)
+    report = backtest(ds, args.test_season, max_rounds=args.max_rounds, stack=not args.no_stack)
     print(format_report(report))
     if args.report:
         save_report(report, args.report)

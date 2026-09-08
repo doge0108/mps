@@ -504,6 +504,34 @@ class Predictor:
             }
         return result
 
+    def _live_stack(self, spec: pd.DataFrame, lineups: pd.DataFrame | None) -> pd.DataFrame | None:
+        """Bottom-up game features from the final player models for the games in ``spec``."""
+        from .models.stacking import model_stack_features
+        if lineups is None or lineups.empty:
+            return None
+        ctx_cols = WEATHER_COLS + ["hp_umpire_id"]
+        bat_rows, pit_rows = [], []
+        for g in spec.itertuples(index=False):
+            wx = {c: getattr(g, c) for c in ctx_cols}
+            for side, opp in (("home", "away"), ("away", "home")):
+                tid = int(getattr(g, f"{side}_team_id"))
+                opp_tid = int(getattr(g, f"{opp}_team_id"))
+                opp_sp = getattr(g, f"{opp}_sp_id")
+                own_sp = getattr(g, f"{side}_sp_id")
+                lu = lineups[(lineups["game_pk"] == g.game_pk) & (lineups["team_id"] == tid)]
+                for order, pid in enumerate(lu["player_id"].tolist()[:9], start=1):
+                    bat_rows.append({"game_pk": g.game_pk, "date": g.date, "player_id": int(pid), "team_id": tid,
+                                     "opp_team_id": opp_tid, "opp_sp_id": opp_sp, "is_home": int(side == "home"),
+                                     "batting_order": order, "bat_starter": 1, **wx})
+                if own_sp is not None and not pd.isna(own_sp):
+                    pit_rows.append({"game_pk": g.game_pk, "date": g.date, "player_id": int(own_sp), "team_id": tid,
+                                     "opp_team_id": opp_tid, "is_home": int(side == "home"), **wx})
+        if not bat_rows or not pit_rows:
+            return None
+        bf = assemble_batter_features(pd.DataFrame(bat_rows), self.states)
+        pf = assemble_pitcher_features(pd.DataFrame(pit_rows), self.states, lineups)
+        return model_stack_features(self.models.batter, self.models.pitcher, bf, pf, spec)
+
     # -------------------------------------------------------------- games
     def predict_games(self, date: str | pd.Timestamp, schedule: pd.DataFrame | None = None,
                       home: str | int | None = None, away: str | int | None = None) -> pd.DataFrame:
@@ -539,6 +567,9 @@ class Predictor:
                      + ["hp_umpire_id"]].copy()
         spec.insert(0, "game_pk", keys)
         feats = assemble_game_features(spec, self.states, lineups)
+        if any(c.startswith("stk_") for c in self.models.game.feature_cols):
+            from .models.stacking import attach_stack
+            feats = attach_stack(feats, self._live_stack(spec, lineups))
         pred = summarise_game_predictions(self.models.game.predict(feats))
         home_lbl = [team_label(t) for t in games["home_team_id"]]
         away_lbl = [team_label(t) for t in games["away_team_id"]]

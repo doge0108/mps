@@ -34,7 +34,8 @@ class ModelBundle:
         return cls(**{name: MultiTargetBooster.load(models_dir / fname) for name, fname in FILES.items()})
 
 
-def train_all(ds: Dataset, max_rounds: int = 1500, verbose: bool = True) -> ModelBundle:
+def train_all(ds: Dataset, max_rounds: int = 1500, verbose: bool = True, stack: bool = True) -> ModelBundle:
+    from .stacking import attach_stack, oof_stack_features
     states = States.from_dataset(ds)
     bf = build_batter_training(ds, states)
     bf = bf[bf["b_games"].notna()].reset_index(drop=True)
@@ -47,6 +48,11 @@ def train_all(ds: Dataset, max_rounds: int = 1500, verbose: bool = True) -> Mode
     if verbose:
         print(f"pitcher model: {len(pf)} rows, best iterations {pitcher.best_iters}")
     gf = build_game_training(ds, states)
+    if stack:
+        if verbose:
+            print("cross-fitting player models for bottom-up game features ...")
+        gf = attach_stack(gf, oof_stack_features(bf, pf, ds.played_games(), max_rounds=min(max_rounds, 400),
+                                                 verbose=verbose))
     game = make_game_model(feature_columns(gf), max_rounds=max_rounds).fit(gf)
     if verbose:
         print(f"game model: {len(gf)} rows, best iterations {game.best_iters}")

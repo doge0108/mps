@@ -125,6 +125,8 @@ state tables  (mps/features/states.py, mps/features/priors.py)
                  pitchers: fastball velocity + trend, whiff, CSW, EV / barrel / xwOBA allowed
   priors         Marcel projection per season (5/4/3 weights, regression, aging) + age
   umpire_state   home-plate umpire K / BB rates vs league over last 30/100 games
+  league_state   league-wide run, HR, BB, K, AVG, SLG rates over the last 30 and 365 days
+                 (so every model tracks the current run environment, not last season's)
   team_state     rolling 5/10/30/162-game form, W/L streak, Elo, park factor, bullpen ERA,
                  bullpen workload (pitches / arms last game and last 3, back-to-back arms,
                  top-3 relievers used)
@@ -138,6 +140,11 @@ feature matrices (mps/features/build.py, mps/features/lineups.py)
                 xwOBA + teams + umpire + weather
   game row    = both teams' form/Elo/park/bullpen fatigue + both starters (form, stuff,
                 prior) + both lineups + umpire + weather
+                + bottom-up "stack" features: the lineup's summed expected H/HR/BB/TB/R and
+                each starter's expected ER/outs/K from the player models.  For training these
+                are cross-fitted (each season predicted by player models that never saw it)
+                so the game model learns how far to trust them without leakage; at prediction
+                time the final player models produce the same columns.
         ▼
 LightGBM boosters (mps/models)
   batter:  Poisson per stat (h, hr, rbi, r, bb, so, sb, tb, ab)
@@ -215,6 +222,7 @@ mps/
   models/base.py       multi-target LightGBM wrapper (time-based early stopping)
   models/*_model.py    objectives and post-processing per model family
   models/evaluate.py   season backtest and report
+  models/stacking.py   cross-fitted player-model predictions -> bottom-up game features
   models/registry.py   train / save / load model bundle
   predict.py           Predictor: name lookup, schedule context, predictions
   cli.py               `mps` command line

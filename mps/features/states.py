@@ -365,6 +365,42 @@ def bullpen_usage(games: pd.DataFrame, pitching_lines: pd.DataFrame) -> pd.DataF
     return log[["team_id", "game_pk", "bp_pitches", "bp_arms", "bp_b2b", "bp_top3_used"]]
 
 
+# ----------------------------------------------------------------- league
+LEAGUE_KEY = 0
+
+
+def league_state(games: pd.DataFrame, batting_lines: pd.DataFrame) -> pd.DataFrame:
+    """League-wide run environment as of each date: rolling 30-day and 365-day rates (prefix ``lg_``).
+
+    Lets the models track within-season shifts (ball, rules, weather) instead of carrying last
+    season's level.  Keyed by the constant ``LEAGUE_KEY`` so it joins like any other state.
+    """
+    played = games[games["home_score"].notna() & games["away_score"].notna()]
+    if played.empty:
+        return pd.DataFrame(columns=["league_key", "date"])
+    per_day_games = played.groupby("date").agg(
+        games=("game_pk", "count"), runs=("home_score", lambda s: float(s.sum())),
+        away_runs=("away_score", lambda s: float(s.sum())))
+    per_day_games["runs"] = per_day_games["runs"] + per_day_games["away_runs"]
+    per_day_bat = batting_lines.groupby("date")[["pa", "ab", "h", "hr", "bb", "so", "tb"]].sum()
+    daily = per_day_games[["games", "runs"]].join(per_day_bat, how="left").fillna(0.0).sort_index()
+    out = pd.DataFrame(index=daily.index)
+    for w, tag in ((30, "30"), (365, "365")):
+        roll = daily.rolling(f"{w}D", min_periods=1).sum()
+        out[f"lg_runs_pg_{tag}"] = safe_div(roll["runs"], 2.0 * roll["games"]).to_numpy()
+        out[f"lg_hr_rate_{tag}"] = safe_div(roll["hr"], roll["pa"]).to_numpy()
+        out[f"lg_bb_rate_{tag}"] = safe_div(roll["bb"], roll["pa"]).to_numpy()
+        out[f"lg_k_rate_{tag}"] = safe_div(roll["so"], roll["pa"]).to_numpy()
+        out[f"lg_avg_{tag}"] = safe_div(roll["h"], roll["ab"]).to_numpy()
+        out[f"lg_slg_{tag}"] = safe_div(roll["tb"], roll["ab"]).to_numpy()
+    for stat in ("runs_pg", "hr_rate", "bb_rate", "k_rate", "avg", "slg"):
+        out[f"lg_{stat}_shift"] = out[f"lg_{stat}_30"] - out[f"lg_{stat}_365"]
+    out["lg_games_30"] = daily["games"].rolling("30D", min_periods=1).sum().to_numpy()
+    out = out.reset_index().rename(columns={"index": "date"})
+    out["league_key"] = LEAGUE_KEY
+    return out[["league_key", "date"] + [c for c in out.columns if c.startswith("lg_")]]
+
+
 # ---------------------------------------------------------------- as-of
 def asof_join(left: pd.DataFrame, state: pd.DataFrame, left_key: str, state_key: str,
               prefix: str = "") -> pd.DataFrame:

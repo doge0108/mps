@@ -10,8 +10,9 @@ from ..config import BATTING_TARGETS, PITCHING_TARGETS
 from ..data.store import Dataset
 from .lineups import lineup_features, starters_from_lines
 from .priors import age_on, batter_priors, pitcher_priors
-from .states import (asof_join, batter_split_state, batter_state, hand_code, pitcher_state, split_key,
-                     statcast_batter_state, statcast_pitcher_state, team_state, umpire_state)
+from .states import (LEAGUE_KEY, asof_join, batter_split_state, batter_state, hand_code, league_state,
+                     pitcher_state, split_key, statcast_batter_state, statcast_pitcher_state, team_state,
+                     umpire_state)
 
 META_COLS = {"game_pk", "date", "player_id", "player_name", "team_id", "opp_team_id", "opp_sp_id",
              "season", "home_team_id", "away_team_id", "home_sp_id", "away_sp_id", "venue_id",
@@ -35,6 +36,7 @@ class States:
     umpires: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["hp_umpire_id", "date"]))
     bat_priors: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["player_id", "date"]))
     pit_priors: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["player_id", "date"]))
+    league: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["league_key", "date"]))
 
     @classmethod
     def from_dataset(cls, ds: Dataset) -> "States":
@@ -50,6 +52,7 @@ class States:
             umpires=umpire_state(played, ds.pitching_lines),
             bat_priors=batter_priors(ds.batting_lines, played, ds.players),
             pit_priors=pitcher_priors(ds.pitching_lines, played, ds.players),
+            league=league_state(played, ds.batting_lines),
         )
 
     def age(self, player_ids: pd.Series, dates: pd.Series) -> pd.Series:
@@ -152,7 +155,9 @@ def _context_joins(df: pd.DataFrame, states: States, batter_col: str | None, pit
     if "hp_umpire_id" not in df.columns:
         df["hp_umpire_id"] = np.nan
     df = asof_join(df, states.umpires, "hp_umpire_id", "hp_umpire_id")
-    return df
+    df["_league_key"] = LEAGUE_KEY
+    df = asof_join(df, states.league, "_league_key", "league_key")
+    return df.drop(columns=["_league_key"])
 
 
 def _spec_with_weather(lines: pd.DataFrame, games: pd.DataFrame, cols: list[str]) -> pd.DataFrame:

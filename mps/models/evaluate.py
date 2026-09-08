@@ -49,7 +49,8 @@ def _mae_table(test: pd.DataFrame, pred: pd.DataFrame, targets: list[str], basel
     return rows
 
 
-def backtest(ds: Dataset, test_season: int | None = None, max_rounds: int = 1500) -> dict:
+def backtest(ds: Dataset, test_season: int | None = None, max_rounds: int = 1500, stack: bool = True) -> dict:
+    from .stacking import attach_stack, model_stack_features, oof_stack_features
     seasons = ds.seasons()
     if len(seasons) < 2:
         raise ValueError("backtest needs at least two seasons of data")
@@ -61,32 +62,37 @@ def backtest(ds: Dataset, test_season: int | None = None, max_rounds: int = 1500
     bf = build_batter_training(ds, states)
     bf = bf[bf["b_games"].notna()]  # need some history to be a fair comparison
     cols = feature_columns(bf)
-    train, test = _split_by_season(bf, ds, test_season)
-    model = make_batter_model(cols, max_rounds=max_rounds).fit(train)
-    pred = model.predict(test)
-    report["batters"] = {"n_test": int(len(test)), "stats": _mae_table(test, pred, BATTING_TARGETS, "b_", 30)}
+    b_train, b_test = _split_by_season(bf, ds, test_season)
+    batter = make_batter_model(cols, max_rounds=max_rounds).fit(b_train)
+    pred = batter.predict(b_test)
+    report["batters"] = {"n_test": int(len(b_test)), "stats": _mae_table(b_test, pred, BATTING_TARGETS, "b_", 30)}
 
     # ---- pitchers
     pf = build_pitcher_training(ds, states)
     pf = pf[pf["p_apps"].notna()]
     cols = feature_columns(pf)
-    train, test = _split_by_season(pf, ds, test_season)
-    model = make_pitcher_model(cols, max_rounds=max_rounds).fit(train)
-    pred = model.predict(test)
-    report["pitchers"] = {"n_test": int(len(test)), "stats": _mae_table(test, pred, PITCHING_TARGETS, "p_", 10)}
+    p_train, p_test = _split_by_season(pf, ds, test_season)
+    pitcher = make_pitcher_model(cols, max_rounds=max_rounds).fit(p_train)
+    pred = pitcher.predict(p_test)
+    report["pitchers"] = {"n_test": int(len(p_test)), "stats": _mae_table(p_test, pred, PITCHING_TARGETS, "p_", 10)}
 
-    # ---- games
+    # ---- games (stack features: cross-fitted inside the training seasons, model-predicted for the test season)
     gf = build_game_training(ds, states)
-    cols = feature_columns(gf)
     train, test = _split_by_season(gf, ds, test_season)
+    if stack:
+        played = ds.played_games()
+        train = attach_stack(train, oof_stack_features(b_train, p_train, played, max_rounds=min(max_rounds, 400)))
+        test = attach_stack(test, model_stack_features(batter, pitcher, b_test, p_test, played))
+    cols = feature_columns(train)
     model = make_game_model(cols, max_rounds=max_rounds).fit(train)
     pred = summarise_game_predictions(model.predict(test))
     y = test["y_home_win"].to_numpy()
     p = pred["home_win_prob"].clip(1e-4, 1 - 1e-4).to_numpy()
     elo_p = test["elo_home_prob"].fillna(0.54).clip(1e-4, 1 - 1e-4).to_numpy()
     home_rate = float(train["y_home_win"].mean())
+    stack_cols = [c for c in cols if c.startswith("stk_")]
     report["games"] = {
-        "n_test": int(len(test)),
+        "n_test": int(len(test)), "stacked": bool(stack_cols),
         "accuracy_model": float(((p >= 0.5) == y).mean()),
         "accuracy_elo": float(((elo_p >= 0.5) == y).mean()),
         "accuracy_always_home": float(y.mean()),
