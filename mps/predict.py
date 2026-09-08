@@ -346,6 +346,7 @@ class Predictor:
             "umpire": self.umpire_info(ctx["hp_umpire_id"], ctx["hp_umpire_name"], date),
             "opp_bullpen": self.bullpen_status(ctx["opp_team_id"], date),
             "actual": self.actual_lines(match.player_id, ctx["game_pk"]) or None,
+            "game_status": ctx.get("status"),
         }
         wx = {c: ctx["weather"].get(c) for c in WEATHER_COLS} | {"hp_umpire_id": ctx["hp_umpire_id"]}
         opp_team = ctx["opp_team_id"] if ctx["opp_team_id"] is not None else -1

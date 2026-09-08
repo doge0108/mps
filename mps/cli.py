@@ -316,6 +316,10 @@ def cmd_predict_player(args) -> int:
             ap = a["pitching"]
             print(f"  Pitched{' (start)' if ap['started'] else ' (relief)'}: IP {ap['innings_pitched']}, H {ap['h']}, "
                   f"ER {ap['er']}, BB {ap['bb']}, SO {ap['so']}, HR {ap['hr']}, pitches {ap['pitches']}")
+    elif result["context_source"] == "schedule":
+        status = result.get("game_status") or "scheduled"
+        print(f"  Actual stats: not stored yet (game status in data: {status}). "
+              f"Run `mps update` after the game is final, then rerun this command.")
     if result["context_source"] == "unknown":
         print("  note: no game found for this date; run `mps update`, or pass --opponent / --live for matchup-aware predictions.")
     if args.date is None:
