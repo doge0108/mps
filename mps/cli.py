@@ -15,6 +15,8 @@ from .config import DEFAULT_DATA_DIR, DEFAULT_MODELS_DIR
 def _add_dirs(p: argparse.ArgumentParser) -> None:
     p.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR, help="where games/batting/pitching CSVs live")
     p.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR, help="where trained models are stored")
+    p.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS,
+                   help="print progress details and warnings")
 
 
 def parse_seasons(tokens: list[str]) -> list[int]:
@@ -31,7 +33,7 @@ def parse_seasons(tokens: list[str]) -> list[int]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mps", description="MLB player-stat and game-outcome prediction")
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-v", "--verbose", action="store_true", default=False)
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("fetch", help="download real seasons from the MLB Stats API (in-progress seasons OK)")
@@ -73,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--opponent", default=None, help="opponent team if the game is not in the stored schedule")
     p.add_argument("--away", action="store_true", help="player's team is the away team (with --opponent)")
     p.add_argument("--order", type=int, default=None, help="batting order slot 1-9")
+    p.add_argument("--opp-starter", default=None, help="override the opposing starting pitcher (name or id)")
+    p.add_argument("--home-starter", default=None, help="(pitchers) override the listed starter check: treat this player as the starter")
     p.add_argument("--live", action="store_true", help="look up that day's schedule/probable pitchers from the MLB API")
     p.add_argument("--json", action="store_true")
     _add_dirs(p)
@@ -95,7 +99,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _today() -> str:
-    return pd.Timestamp.today().strftime("%Y-%m-%d")
+    """MLB dates games by the US calendar day, so default to the current date in US Eastern time."""
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:  # pragma: no cover - missing tz database
+        now = datetime.now()
+    return now.strftime("%Y-%m-%d")
 
 
 def _live_schedule(date: str) -> pd.DataFrame | None:
@@ -121,6 +132,9 @@ def cmd_fetch(args) -> int:
 def cmd_update(args) -> int:
     from .data.ingest import update
     ds = update(args.data_dir, days_ahead=args.days_ahead, weather=not args.no_weather, statcast=not args.no_statcast)
+    if len(ds.lineups) == 0:
+        print("note: no announced lineups stored yet; lineups are usually posted 2-4 hours before first pitch, "
+              "run `mps update` again then.")
     up = ds.upcoming_games()
     print(f"Dataset now has {len(ds.played_games())} completed games (latest {ds.played_games()['date'].max().date()}) "
           f"and {len(up)} upcoming games -> {args.data_dir}")
@@ -139,7 +153,8 @@ def cmd_statcast(args) -> int:
         if g.empty:
             print(f"no stored games for {season}; run `mps fetch {season}` first")
             continue
-        bat, pit = fetch_statcast(g["date"].min().date(), g["date"].max().date(), args.data_dir)
+        bat, pit = fetch_statcast(g["date"].min().date(), g["date"].max().date(), args.data_dir,
+                                  verbose=args.verbose)
         add = Dataset(games=ds.games.iloc[:0], batting_lines=ds.batting_lines.iloc[:0],
                       pitching_lines=ds.pitching_lines.iloc[:0], statcast_batting=bat, statcast_pitching=pit)
         ds = ds.concat(add)
@@ -194,7 +209,8 @@ def cmd_predict_player(args) -> int:
     schedule = _live_schedule(date) if args.live else None
     result = pred.predict_player(args.player, date, opponent=args.opponent,
                                  is_home=None if args.opponent is None else int(not args.away),
-                                 batting_order=args.order, schedule=schedule)
+                                 batting_order=args.order, schedule=schedule, opp_starter=args.opp_starter,
+                                 as_starter=args.home_starter is not None)
     if args.json:
         print(json.dumps(result, indent=2))
         return 0
@@ -221,7 +237,10 @@ def cmd_predict_player(args) -> int:
     if "batting" in result:
         b = result["batting"]
         hand = f" ({b['opposing_starter_hand']}HP)" if b["opposing_starter_hand"] else ""
-        print(f"  Opposing starter: {b['opposing_starter'] or 'unknown'}{hand}")
+        src = {"schedule": "probable per schedule at last update", "rotation_guess": "GUESSED from rotation, "
+               "run `mps update` or pass --opp-starter", "override": "set with --opp-starter", None: ""}
+        print(f"  Opposing starter: {b['opposing_starter'] or 'unknown'}{hand}"
+              f"{'  [' + src[b.get('opposing_starter_source')] + ']' if b.get('opposing_starter_source') else ''}")
         lineup = b["lineup"]
         slot = f"batting {b['batting_order']}"
         if lineup["source"] == "announced":
@@ -286,8 +305,25 @@ def cmd_predict_player(args) -> int:
         print(f"  Pitching, expected: IP {p['innings_pitched']}, " +
               ", ".join(f"{k.upper()} {v:.2f}" for k, v in p["expected"].items() if k != "outs"))
         print("  Probabilities: " + ", ".join(f"{k} {v:.0%}" for k, v in p["probabilities"].items()))
+    if result.get("actual"):
+        a = result["actual"]
+        print(f"  --- Actual ({a.get('final_score', 'final')}) ---")
+        if "batting" in a:
+            ab = a["batting"]
+            print(f"  Batted {ab['batting_order']}: {ab['h']}-for-{ab['ab']}, HR {ab['hr']}, RBI {ab['rbi']}, R {ab['r']}, "
+                  f"BB {ab['bb']}, SO {ab['so']}, SB {ab['sb']}, TB {ab['tb']}")
+        if "pitching" in a:
+            ap = a["pitching"]
+            print(f"  Pitched{' (start)' if ap['started'] else ' (relief)'}: IP {ap['innings_pitched']}, H {ap['h']}, "
+                  f"ER {ap['er']}, BB {ap['bb']}, SO {ap['so']}, HR {ap['hr']}, pitches {ap['pitches']}")
+    elif result["context_source"] == "schedule":
+        status = result.get("game_status") or "scheduled"
+        print(f"  Actual stats: not stored yet (game status in data: {status}). "
+              f"Run `mps update` after the game is final, then rerun this command.")
     if result["context_source"] == "unknown":
         print("  note: no game found for this date; run `mps update`, or pass --opponent / --live for matchup-aware predictions.")
+    if args.date is None:
+        print(f"  (date defaulted to {date}, the current MLB calendar day in US Eastern time; pass --date to change)")
     return 0
 
 

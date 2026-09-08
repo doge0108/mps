@@ -160,6 +160,7 @@ class Predictor:
             own_sp = g["home_sp_id" if home else "away_sp_id"]
             return {"source": "schedule", "game_pk": int(g["game_pk"]), "is_home": int(home), "opp_team_id": opp,
                     "opp_sp_id": self._probable_starter(opp, date) if pd.isna(opp_sp) else int(opp_sp),
+                    "opp_sp_source": "rotation_guess" if pd.isna(opp_sp) else "schedule",
                     "own_sp_id": self._probable_starter(team_id, date) if pd.isna(own_sp) else int(own_sp),
                     "weather": {c: (None if pd.isna(g[c]) else g[c]) for c in WEATHER_COLS},
                     "hp_umpire_id": None if pd.isna(g["hp_umpire_id"]) else int(g["hp_umpire_id"]),
@@ -169,7 +170,7 @@ class Predictor:
             opp = resolve_team(opponent)
             home = 1 if is_home is None else int(is_home)
             return {"source": "manual", "game_pk": None, "is_home": home, "opp_team_id": opp,
-                    "opp_sp_id": self._probable_starter(opp, date),
+                    "opp_sp_id": self._probable_starter(opp, date), "opp_sp_source": "rotation_guess",
                     "own_sp_id": self._probable_starter(team_id, date),
                     "weather": {c: None for c in WEATHER_COLS}, "hp_umpire_id": None, "hp_umpire_name": None,
                     "status": None}
@@ -297,13 +298,44 @@ class Predictor:
                 "top3_used_last_game": int(s["tm_bp_top3_used_last"]),
                 "bullpen_era_r30": _safe_round(s.get("tm_bullpen_era_r30"), 2)}
 
+    def actual_lines(self, player_id: int, game_pk: int | None) -> dict:
+        """Box-score line(s) for a completed game, if stored (used to grade a prediction)."""
+        out: dict = {}
+        if game_pk is None:
+            return out
+        b = self.ds.batting_lines
+        row = b[(b["game_pk"] == game_pk) & (b["player_id"] == player_id)]
+        if len(row):
+            r = row.iloc[0]
+            out["batting"] = {k: int(r[k]) for k in ("pa", "ab", "h", "hr", "rbi", "r", "bb", "so", "sb", "tb")}
+            out["batting"]["batting_order"] = int(r["batting_order"])
+        p = self.ds.pitching_lines
+        row = p[(p["game_pk"] == game_pk) & (p["player_id"] == player_id)]
+        if len(row):
+            r = row.iloc[0]
+            outs = int(r["outs"])
+            out["pitching"] = {**{k: int(r[k]) for k in ("outs", "h", "r", "er", "bb", "so", "hr", "bf", "pitches")},
+                               "innings_pitched": f"{outs // 3}.{outs % 3}", "started": bool(r["is_starter"])}
+        g = self.ds.games[self.ds.games["game_pk"] == game_pk]
+        if len(g) and pd.notna(g.iloc[0]["home_score"]):
+            gg = g.iloc[0]
+            out["final_score"] = f"{team_label(gg['home_team_id'])} {int(gg['home_score'])} - " \
+                                 f"{team_label(gg['away_team_id'])} {int(gg['away_score'])}"
+        return out
+
     # ------------------------------------------------------------ players
     def predict_player(self, player: str, date: str | pd.Timestamp, opponent: str | int | None = None,
                        is_home: int | None = None, batting_order: int | None = None,
-                       schedule: pd.DataFrame | None = None) -> dict:
+                       schedule: pd.DataFrame | None = None, opp_starter: str | int | None = None,
+                       as_starter: bool = False) -> dict:
         date = pd.Timestamp(date).normalize()
         match = self.find_player(player)
         ctx = self.resolve_game_context(match.team_id, date, opponent, is_home, schedule)
+        if opp_starter is not None:
+            ctx["opp_sp_id"] = self.find_player(str(opp_starter)).player_id
+            ctx["opp_sp_source"] = "override"
+        if as_starter:
+            ctx["own_sp_id"] = match.player_id
         result: dict = {
             "player": match.name, "player_id": match.player_id, "team": team_label(match.team_id),
             "date": date.strftime("%Y-%m-%d"),
@@ -313,6 +345,8 @@ class Predictor:
             "weather": ctx["weather"] if any(v is not None for v in ctx["weather"].values()) else None,
             "umpire": self.umpire_info(ctx["hp_umpire_id"], ctx["hp_umpire_name"], date),
             "opp_bullpen": self.bullpen_status(ctx["opp_team_id"], date),
+            "actual": self.actual_lines(match.player_id, ctx["game_pk"]) or None,
+            "game_status": ctx.get("status"),
         }
         wx = {c: ctx["weather"].get(c) for c in WEATHER_COLS} | {"hp_umpire_id": ctx["hp_umpire_id"]}
         opp_team = ctx["opp_team_id"] if ctx["opp_team_id"] is not None else -1
@@ -338,6 +372,7 @@ class Predictor:
             bats = self._hand(match.player_id, "bats")
             result["batting"] = {
                 "opposing_starter": self._pitcher_name(ctx["opp_sp_id"]),
+                "opposing_starter_source": ctx.get("opp_sp_source") if ctx["opp_sp_id"] is not None else None,
                 "opposing_starter_hand": opp_hand,
                 "bats": bats,
                 "platoon_advantage": (None if bats is None or opp_hand is None

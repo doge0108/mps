@@ -31,6 +31,10 @@ def test_predict_player_for_scheduled_game(trained, small_dataset):
     out = pred.predict_player(str(pid), last_game["date"])
     assert out["context_source"] == "schedule"
     assert out["opponent"] is not None
+    # a completed game carries the actual box-score line for grading
+    actual = out["actual"]
+    assert actual["batting"]["h"] == int(lines.iloc[0]["h"]) and actual["batting"]["ab"] == int(lines.iloc[0]["ab"])
+    assert actual["final_score"].startswith(pred.ds.games.pipe(lambda g: __import__("mps.config", fromlist=["team_label"]).team_label(last_game["home_team_id"])))
     exp = out["batting"]["expected"]
     assert 0.2 < exp["h"] < 3 and 0 < exp["hr"] < 1 and 2 < exp["ab"] < 5.5
     probs = out["batting"]["probabilities"]
@@ -129,6 +133,12 @@ def test_predict_upcoming_game_with_announced_lineup(trained, small_dataset):
     assert b["contact"]["ev_r30"] > 60 and b["opposing_starter_stuff"]["velo_r10"] > 80
     assert b["prior"]["season"] == 2024 and 0 < b["prior"]["reliability"] < 1
     assert out["opp_bullpen"]["arms_used_last_game"] >= 0 and "back_to_back_arms" in out["opp_bullpen"]
+    assert b["opposing_starter_source"] == "rotation_guess"   # upcoming row had no probable pitcher
+    # the opposing starter can be overridden by name or id
+    sp = ds.pitching_lines[(ds.pitching_lines["is_starter"] == 1) & (ds.pitching_lines["team_id"] == g["away_team_id"])].iloc[0]
+    out_o = pred.predict_player(str(leadoff_last_game), tomorrow, opp_starter=int(sp["player_id"]))
+    assert out_o["batting"]["opposing_starter_source"] == "override"
+    assert out_o["batting"]["opposing_starter"] == sp["player_name"]
     # a player who is not in the announced lineup is flagged
     bench = home_bats[~home_bats["player_id"].isin(last9)]["player_id"].iloc[0]
     assert pred.predict_player(str(int(bench)), tomorrow)["batting"]["lineup"]["in_lineup"] is False

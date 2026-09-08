@@ -107,7 +107,10 @@ class FakeClient(MLBStatsClient):
                                               **{api: int(r[c]) for c, api in _PIT_KEYS.items()}}
             teams[side] = {"team": {"id": tid}, "pitchers": [int(p) for p in pitchers["player_id"]],
                            "players": players}
-        return {"teams": teams}
+        ump = g.get("hp_umpire_id")
+        officials = [] if ump is None or pd.isna(ump) else [
+            {"official": {"id": int(ump), "fullName": g.get("hp_umpire_name")}, "officialType": "Home Plate"}]
+        return {"teams": teams, "officials": officials}
 
     def weather(self, game_pk, final=True):
         self.calls.append(f"weather {game_pk}")
