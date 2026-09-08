@@ -81,6 +81,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     _add_dirs(p)
 
+    p = sub.add_parser("predict-team", help="predict every batter in a team's lineup plus its starter for a game")
+    p.add_argument("team", help="team abbreviation, name or id (e.g. LAD, Dodgers)")
+    p.add_argument("--date", default=None, help="game date YYYY-MM-DD (default: today, US Eastern)")
+    p.add_argument("--opponent", default=None, help="opponent if the game is not in the stored schedule")
+    p.add_argument("--away", action="store_true", help="team is the away side (with --opponent)")
+    p.add_argument("--live", action="store_true")
+    p.add_argument("--json", action="store_true")
+    _add_dirs(p)
+
     p = sub.add_parser("predict-game", help="predict game outcomes for a date or matchup")
     p.add_argument("--date", default=None, help="game date YYYY-MM-DD (default: today)")
     p.add_argument("--home", default=None)
@@ -343,6 +352,79 @@ def cmd_predict_player(args) -> int:
     return 0
 
 
+def cmd_predict_team(args) -> int:
+    pred = _predictor(args)
+    date = args.date or _today()
+    schedule = _live_schedule(date) if args.live else None
+    r = pred.predict_team(args.team, date, opponent=args.opponent,
+                          is_home=None if args.opponent is None else int(not args.away), schedule=schedule)
+    if args.json:
+        print(json.dumps(r, indent=2))
+        return 0
+    where = "vs" if r["is_home"] else "@"
+    head = f"{r['team']} {where} {r['opponent'] or 'unknown opponent'} on {r['date']}  [context: {r['context_source']}]"
+    if r.get("final_score"):
+        head += f"  FINAL {r['final_score']}"
+    print(head)
+    from .predict import _weather_text
+    if r.get("weather"):
+        print(f"  Weather: {_weather_text(r['weather'])}")
+    if r.get("umpire"):
+        print(f"  Umpire: {r['umpire']['name']}")
+    hand = f" ({r['opposing_starter_hand']}HP)" if r.get("opposing_starter_hand") else ""
+    print(f"  Opposing starter: {r['opposing_starter'] or 'unknown'}{hand}")
+    src = {"announced": "announced lineup", "box_score": "actual lineup from the box score",
+           "previous_game": "previous game's lineup (not announced yet)"}[r["lineup_source"]]
+    print(f"  Lineup: {src}")
+    if not r["batters"]:
+        print("  no lineup available for this team")
+    else:
+        cols = ["ab", "h", "hr", "rbi", "r", "bb", "so", "sb", "tb"]
+        final = r["final"]
+        header = f"  {'#':>2} {'Batter':22} {'B':1} {'form':6} " + "".join(f"{c.upper():>6}" for c in cols) \
+            + f"{'P(H)':>7}{'P(HR)':>7}"
+        if final:
+            header += "   | actual " + "".join(f"{c.upper():>4}" for c in cols[:8])
+        print(header)
+        tot_exp = {c: 0.0 for c in cols}
+        tot_act = {c: 0 for c in cols}
+        for b in r["batters"]:
+            e = b["expected"]
+            line = (f"  {b['batting_order']:>2} {b['player'][:22]:22} {(b['bats'] or '?')[:1]} {(b['form'] or ''):6} "
+                    + "".join(f"{e[c]:6.2f}" for c in cols) + f"{b['p_hit']:7.0%}{b['p_hr']:7.0%}")
+            for c in cols:
+                tot_exp[c] += e[c]
+            if final:
+                a = b.get("actual")
+                if a:
+                    line += "   | " + " " * 7 + "".join(f"{a[c]:4d}" for c in cols[:8])
+                    for c in cols:
+                        tot_act[c] += a[c]
+                else:
+                    line += "   |        (no box-score line)"
+            print(line)
+        total = f"  {'':2} {'TEAM (starting nine)':22} {'':1} {'':6} " + "".join(f"{tot_exp[c]:6.2f}" for c in cols) + " " * 14
+        if final:
+            total += "   | " + " " * 7 + "".join(f"{tot_act[c]:4d}" for c in cols[:8])
+        print(total)
+    p = r.get("pitcher")
+    if p:
+        e = p["expected"]
+        src = {"box_score": "started", "schedule": "probable per schedule", "rotation_guess": "GUESSED from rotation"}[p["source"]]
+        print(f"  Starter: {p['player']} ({p['throws'] or '?'}HP, {src}) -- expected IP {p['innings_pitched']}, "
+              f"SO {e['so']:.1f}, ER {e['er']:.1f}, H {e['h']:.1f}, BB {e['bb']:.1f}, HR {e['hr']:.1f}; "
+              f"quality start {p['p_quality_start']:.0%}")
+        if p.get("actual"):
+            a = p["actual"]
+            print(f"          actual: IP {a['innings_pitched']}, SO {a['so']}, ER {a['er']}, H {a['h']}, BB {a['bb']}, "
+                  f"HR {a['hr']} ({a['pitches']} pitches)")
+    if r["context_source"] == "unknown":
+        print("  note: no game found for this date; run `mps update` or pass --opponent.")
+    if args.date is None:
+        print(f"  (date defaulted to {date}, the current MLB calendar day in US Eastern time; pass --date to change)")
+    return 0
+
+
 def cmd_predict_game(args) -> int:
     pred = _predictor(args)
     date = args.date or _today()
@@ -395,7 +477,7 @@ def cmd_info(args) -> int:
 
 COMMANDS = {
     "fetch": cmd_fetch, "update": cmd_update, "statcast": cmd_statcast, "simulate": cmd_simulate, "train": cmd_train, "evaluate": cmd_evaluate,
-    "predict-player": cmd_predict_player, "predict-game": cmd_predict_game, "players": cmd_players,
+    "predict-player": cmd_predict_player, "predict-team": cmd_predict_team, "predict-game": cmd_predict_game, "players": cmd_players,
     "info": cmd_info,
 }
 

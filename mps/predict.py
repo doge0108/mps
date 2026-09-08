@@ -425,6 +425,85 @@ class Predictor:
             }
         return result
 
+    # -------------------------------------------------------------- teams
+    def predict_team(self, team: str | int, date: str | pd.Timestamp, opponent: str | int | None = None,
+                     is_home: int | None = None, schedule: pd.DataFrame | None = None) -> dict:
+        """Expected lines for a team's whole lineup and its starting pitcher for one game.
+
+        Lineup source, in order: announced lineup for the game, the box score if the game is final,
+        otherwise the team's previous starting nine.
+        """
+        date = pd.Timestamp(date).normalize()
+        team_id = resolve_team(team)
+        ctx = self.resolve_game_context(team_id, date, opponent, is_home, schedule)
+        game_pk = ctx["game_pk"]
+        final = bool(game_pk) and self.ds.games.loc[self.ds.games["game_pk"] == game_pk, "home_score"].notna().any()
+        lineup, source = self.lineup_for(game_pk, team_id, date)
+        own_sp = ctx.get("own_sp_id")
+        if final:
+            b = self.ds.batting_lines
+            actual9 = b[(b["game_pk"] == game_pk) & (b["team_id"] == team_id) & (b["bat_starter"] == 1)
+                        & b["batting_order"].between(1, 9)]
+            if len(actual9):
+                lineup, source = actual9[["team_id", "player_id", "batting_order"]].sort_values("batting_order"), "box_score"
+            p = self.ds.pitching_lines
+            st = p[(p["game_pk"] == game_pk) & (p["team_id"] == team_id) & (p["is_starter"] == 1)]
+            if len(st):
+                own_sp = int(st.iloc[0]["player_id"])
+        wx = {c: ctx["weather"].get(c) for c in WEATHER_COLS} | {"hp_umpire_id": ctx["hp_umpire_id"]}
+        opp_team = ctx["opp_team_id"] if ctx["opp_team_id"] is not None else -1
+        result: dict = {
+            "team": team_label(team_id), "date": date.strftime("%Y-%m-%d"),
+            "opponent": team_label(ctx["opp_team_id"]) if ctx["opp_team_id"] is not None else None,
+            "is_home": bool(ctx["is_home"]), "context_source": ctx["source"], "lineup_source": source,
+            "final": final, "opposing_starter": self._pitcher_name(ctx["opp_sp_id"]),
+            "opposing_starter_hand": self._hand(ctx["opp_sp_id"], "throws"),
+            "weather": ctx["weather"] if any(v is not None for v in ctx["weather"].values()) else None,
+            "umpire": self.umpire_info(ctx["hp_umpire_id"], ctx["hp_umpire_name"], date),
+            "batters": [], "pitcher": None,
+        }
+        if game_pk is not None and final:
+            g = self.ds.games[self.ds.games["game_pk"] == game_pk].iloc[0]
+            result["final_score"] = f"{team_label(g['home_team_id'])} {int(g['home_score'])} - " \
+                                    f"{team_label(g['away_team_id'])} {int(g['away_score'])}"
+        if len(lineup):
+            spec = pd.DataFrame([{
+                "date": date, "player_id": int(r.player_id), "team_id": team_id, "opp_team_id": opp_team,
+                "opp_sp_id": ctx["opp_sp_id"], "is_home": ctx["is_home"], "batting_order": int(r.batting_order), **wx,
+            } for r in lineup.itertuples(index=False)])
+            feats = assemble_batter_features(spec, self.states)
+            pred = add_probabilities(self.models.batter.predict(feats))
+            for i, r in enumerate(spec.itertuples(index=False)):
+                row = pred.iloc[i]
+                entry = {
+                    "batting_order": int(r.batting_order), "player_id": int(r.player_id),
+                    "player": self._pitcher_name(int(r.player_id)) or str(r.player_id),
+                    "bats": self._hand(int(r.player_id), "bats"),
+                    "expected": {t: round(float(row[t]), 2) for t in BATTING_TARGETS},
+                    "p_hit": round(float(row["p_h_ge1"]), 3), "p_hr": round(float(row["p_hr_ge1"]), 3),
+                    "p_rbi": round(float(row["p_rbi_ge1"]), 3), "p_so": round(float(row["p_so_ge1"]), 3),
+                    "form": (self.batter_form(int(r.player_id), date) or {}).get("label"),
+                }
+                actual = self.actual_lines(int(r.player_id), game_pk).get("batting") if final else None
+                entry["actual"] = actual
+                result["batters"].append(entry)
+        if own_sp is not None:
+            spec = pd.DataFrame([{"game_pk": -1, "date": date, "player_id": int(own_sp), "team_id": team_id,
+                                  "opp_team_id": opp_team, "is_home": ctx["is_home"], **wx}])
+            lineups = self._lineup_rows(-1, ctx["opp_team_id"], date, game_pk) if ctx["opp_team_id"] is not None else None
+            row = self.models.pitcher.predict(assemble_pitcher_features(spec, self.states, lineups)).iloc[0]
+            outs = int(round(float(row["outs"])))
+            result["pitcher"] = {
+                "player_id": int(own_sp), "player": self._pitcher_name(int(own_sp)),
+                "throws": self._hand(int(own_sp), "throws"),
+                "source": "box_score" if final else ("schedule" if ctx["source"] == "schedule" else "rotation_guess"),
+                "expected": {t: round(float(row[t]), 2) for t in PITCHING_TARGETS},
+                "innings_pitched": f"{outs // 3}.{outs % 3}",
+                "p_quality_start": round(_quality_start_prob(float(row["outs"]), float(row["er"])), 3),
+                "actual": self.actual_lines(int(own_sp), game_pk).get("pitching") if final else None,
+            }
+        return result
+
     # -------------------------------------------------------------- games
     def predict_games(self, date: str | pd.Timestamp, schedule: pd.DataFrame | None = None,
                       home: str | int | None = None, away: str | int | None = None) -> pd.DataFrame:

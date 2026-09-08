@@ -44,6 +44,7 @@ mps evaluate                   # backtest on the most recent season vs baselines
 
 mps predict-player "Aaron Judge" --date 2026-09-08
 mps predict-player "Tarik Skubal" --date 2026-09-08 --json
+mps predict-team NYY --date 2026-09-08             # every batter in the lineup + the starter
 mps predict-game --date 2026-09-08                 # every game that day
 mps predict-game --date 2026-09-08 --home NYY --away BOS
 mps players skubal             # find players / ids in the dataset
@@ -94,6 +95,13 @@ Julio Tucker (NYY) vs BOS on 2024-09-30  [context: schedule]
 
 The `lineups` column says where each side's nine came from: `anno` = announced
 lineup, `prev` = the team's previous game (fallback).
+
+`mps predict-team LAD --date 2026-09-07` prints the whole lineup (announced
+lineup, the box-score lineup if the game is final, otherwise the previous
+game's nine) with each batter's expected line, hit and HR probabilities and
+form, a team total, and the starting pitcher's expected line.  For a finished
+game the actual box-score numbers are printed beside the expectations, as they
+are at the bottom of `predict-player`.
 
 ### Installation notes
 

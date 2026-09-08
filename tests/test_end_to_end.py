@@ -146,3 +146,21 @@ def test_predict_upcoming_game_with_announced_lineup(trained, small_dataset):
     assert len(table) == 1 and table["lineups"].iloc[0] == "anno/prev"
     assert "95F" in table["weather"].iloc[0] and table["home_sp"].iloc[0] is not None
     assert table["umpire"].iloc[0] == ds.games["hp_umpire_name"].iloc[-1]
+
+
+def test_predict_team_completed_and_upcoming(trained, small_dataset):
+    ds = small_dataset
+    pred = Predictor(ds=ds, models=ModelBundle.load(trained))
+    g = ds.games.sort_values("date").iloc[-1]
+    r = pred.predict_team(int(g["home_team_id"]), g["date"])
+    assert r["final"] and r["lineup_source"] == "box_score" and r["final_score"]
+    assert len(r["batters"]) == 9 and [b["batting_order"] for b in r["batters"]] == list(range(1, 10))
+    for b in r["batters"]:
+        assert 0 < b["expected"]["h"] < 3 and b["actual"] is not None and b["actual"]["ab"] >= 0
+    assert r["pitcher"]["source"] == "box_score" and r["pitcher"]["actual"]["started"] is True
+    assert r["pitcher"]["player_id"] == int(g["home_sp_id"])
+    # upcoming game with no lineup announced: previous game's nine, no actuals
+    tomorrow = ds.games["date"].max() + pd.Timedelta(days=1)
+    r2 = pred.predict_team(int(g["away_team_id"]), tomorrow, opponent=int(g["home_team_id"]), is_home=0)
+    assert not r2["final"] and r2["lineup_source"] == "previous_game" and len(r2["batters"]) == 9
+    assert all(b["actual"] is None for b in r2["batters"]) and r2["pitcher"]["source"] == "rotation_guess"
