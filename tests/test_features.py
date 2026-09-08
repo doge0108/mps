@@ -54,6 +54,7 @@ def test_feature_matrices_have_targets_and_numeric_features(small_dataset):
         assert all(pd.api.types.is_numeric_dtype(frame[c]) for c in cols)
         assert not any(c.startswith("y_") for c in cols)
     assert {"y_h", "y_hr", "y_ab"} <= set(bf.columns)
+    assert "bat_starter" in feature_columns(bf) and bf["bat_starter"].eq(1).all()
     assert {"y_so", "y_er", "y_outs"} <= set(pf.columns)
     assert {"y_home_win", "y_home_runs", "y_away_runs"} <= set(gf.columns)
 

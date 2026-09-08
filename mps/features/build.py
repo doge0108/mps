@@ -131,6 +131,9 @@ def assemble_batter_features(spec: pd.DataFrame, states: States) -> pd.DataFrame
     df["month"] = df["date"].dt.month
     df["is_home"] = df["is_home"].astype(float)
     df["batting_order"] = pd.to_numeric(df["batting_order"], errors="coerce").astype(float)
+    # starters vs. substitutes share a lineup slot number; predictions are always for starters
+    df["bat_starter"] = pd.to_numeric(df["bat_starter"], errors="coerce").fillna(1.0).astype(float) \
+        if "bat_starter" in df.columns else 1.0
     df["park_factor"] = np.where(df["is_home"] == 1, df["own_tm_park_factor"], df["opp_tm_park_factor"])
     df["opp_sp_known"] = df["opp_p_apps"].notna().astype(float)
     df = _attach_weather(df)
@@ -161,7 +164,7 @@ def build_batter_training(ds: Dataset, states: States | None = None) -> pd.DataF
     states = states or States.from_dataset(ds)
     lines = ds.batting_lines
     spec = _spec_with_weather(lines, ds.games, ["game_pk", "date", "player_id", "player_name", "team_id",
-                                                "opp_team_id", "opp_sp_id", "is_home", "batting_order"])
+                                                "opp_team_id", "opp_sp_id", "is_home", "batting_order", "bat_starter"])
     feats = assemble_batter_features(spec, states)
     for t in BATTING_TARGETS:
         feats[f"y_{t}"] = lines[t].to_numpy()
