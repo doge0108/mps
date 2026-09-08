@@ -204,6 +204,8 @@ def cmd_predict_player(args) -> int:
     if result.get("weather"):
         from .predict import _weather_text
         print(f"  Weather: {_weather_text(result['weather'])}")
+    if result["context_source"] == "schedule" and not result.get("umpire"):
+        print("  Umpire: not announced yet (run `mps update` closer to first pitch)")
     if result.get("umpire"):
         u = result["umpire"]
         tend = ""
@@ -259,6 +261,10 @@ def cmd_predict_player(args) -> int:
         print("  Probabilities: " + ", ".join(f"{k} {v:.0%}" for k, v in b["probabilities"].items()))
     if "pitching" in result:
         p = result["pitching"]
+        if not p.get("probable_starter", True):
+            listed = p.get("listed_starter") or "another pitcher"
+            print(f"  Pitching: NOT the probable starter for this game ({listed} is listed). "
+                  f"Hypothetical line if they started:")
         f = p["form"]
         if f:
             print(f"  Pitching form: {f['label'].upper()} -- last 3 starts ERA {f['last3']['era']}, "
