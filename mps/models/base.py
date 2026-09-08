@@ -5,9 +5,18 @@ from pathlib import Path
 from typing import Any
 
 import joblib
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
+
+try:
+    import lightgbm as lgb
+except OSError as exc:  # pragma: no cover - platform specific
+    if "libomp" in str(exc):
+        raise ImportError(
+            "LightGBM could not load the OpenMP runtime (libomp). On macOS install it with "
+            "`brew install libomp` (see README, 'Installation notes'); on Linux install `libgomp1`."
+        ) from exc
+    raise
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "learning_rate": 0.06,

@@ -28,6 +28,8 @@ logistic for win probability) trained on leak-free rolling features.
 
 ```bash
 pip install -e ".[dev]"
+# macOS only: LightGBM needs the OpenMP runtime
+brew install libomp
 
 # Option A: real data from the free MLB Stats API + Baseball Savant (no keys).
 # An in-progress season is fine: you get everything played so far.
@@ -92,6 +94,13 @@ Julio Tucker (NYY) vs BOS on 2024-09-30  [context: schedule]
 
 The `lineups` column says where each side's nine came from: `anno` = announced
 lineup, `prev` = the team's previous game (fallback).
+
+### Installation notes
+
+* **macOS**: the LightGBM wheel loads `libomp.dylib` from Homebrew.  If you see
+  `Library not loaded: @rpath/libomp.dylib`, run `brew install libomp`.
+* **Linux**: if LightGBM complains about `libgomp`, install `libgomp1` (Debian /
+  Ubuntu) or `libgomp` (Fedora).
 
 ## How it works
 
