@@ -10,10 +10,11 @@ import numpy as np
 import pandas as pd
 
 DEFAULT_PARAMS: dict[str, Any] = {
-    "learning_rate": 0.03,
+    "learning_rate": 0.06,
     "num_leaves": 31,
     "min_child_samples": 60,
-    "feature_fraction": 0.8,
+    "feature_fraction": 0.5,
+    "max_bin": 63,
     "bagging_fraction": 0.8,
     "bagging_freq": 1,
     "lambda_l2": 1.0,
@@ -59,14 +60,15 @@ class MultiTargetBooster:
                 params["metric"] = "binary_logloss"
             booster = lgb.train(
                 params, dtrain, num_boost_round=self.max_rounds, valid_sets=[dvalid],
-                callbacks=[lgb.early_stopping(80, verbose=False)],
+                callbacks=[lgb.early_stopping(60, verbose=False)],
             )
             self.boosters[target] = booster
             self.best_iters[target] = int(booster.best_iteration or self.max_rounds)
         return self
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
-        X = df[self.feature_cols].astype("float32")
+        # columns the model never saw are dropped; columns missing now (e.g. no Statcast yet) become NaN
+        X = df.reindex(columns=self.feature_cols).astype("float32")
         out = {}
         for target, booster in self.boosters.items():
             out[target] = booster.predict(X, num_iteration=self.best_iters[target])

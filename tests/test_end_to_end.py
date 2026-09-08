@@ -94,6 +94,7 @@ def test_predict_upcoming_game_with_announced_lineup(trained, small_dataset):
         "home_score": None, "away_score": None, "home_sp_id": None, "away_sp_id": None,
         "venue_id": g["home_team_id"], "status": "Preview",
         "day_night": "day", "temp_f": 95.0, "wind_mph": 15.0, "wind_dir": "Out To CF", "condition": "Sunny",
+        "hp_umpire_id": int(ds.games["hp_umpire_id"].iloc[-1]), "hp_umpire_name": ds.games["hp_umpire_name"].iloc[-1],
     }])
     home_bats = ds.batting_lines[ds.batting_lines["team_id"] == g["home_team_id"]]
     last9 = home_bats[home_bats["game_pk"] == home_bats.sort_values("date")["game_pk"].iloc[-1]]
@@ -113,9 +114,15 @@ def test_predict_upcoming_game_with_announced_lineup(trained, small_dataset):
     assert b["bats"] in ("L", "R", "S") and b["opposing_starter_hand"] in ("L", "R")
     assert b["form"]["label"] in ("hot", "cold", "steady") and b["form"]["last5"]["games"] == 5
     assert b["split_vs_hand"] is not None and 0 <= b["split_vs_hand"]["avg"] <= 1
+    assert out["umpire"]["name"] == ds.games["hp_umpire_name"].iloc[-1] and out["umpire"]["games"] > 0
+    assert 18 < out["age"] < 45
+    assert b["contact"]["ev_r30"] > 60 and b["opposing_starter_stuff"]["velo_r10"] > 80
+    assert b["prior"]["season"] == 2024 and 0 < b["prior"]["reliability"] < 1
+    assert out["opp_bullpen"]["arms_used_last_game"] >= 0 and "back_to_back_arms" in out["opp_bullpen"]
     # a player who is not in the announced lineup is flagged
     bench = home_bats[~home_bats["player_id"].isin(last9)]["player_id"].iloc[0]
     assert pred.predict_player(str(int(bench)), tomorrow)["batting"]["lineup"]["in_lineup"] is False
     table = pred.predict_games(tomorrow)
     assert len(table) == 1 and table["lineups"].iloc[0] == "anno/prev"
     assert "95F" in table["weather"].iloc[0] and table["home_sp"].iloc[0] is not None
+    assert table["umpire"].iloc[0] == ds.games["hp_umpire_name"].iloc[-1]

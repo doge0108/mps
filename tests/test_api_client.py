@@ -61,9 +61,20 @@ def test_parse_wind_and_weather():
 
 def test_parse_players_handedness():
     payload = {"people": [{"id": 5, "fullName": "Lefty Lou", "batSide": {"code": "L"}, "pitchHand": {"code": "R"},
-                           "primaryPosition": {"abbreviation": "1B"}, "currentTeam": {"id": 111}}]}
+                           "primaryPosition": {"abbreviation": "1B"}, "currentTeam": {"id": 111},
+                           "birthDate": "1996-04-02"}]}
     assert parse_players(payload) == [{"player_id": 5, "player_name": "Lefty Lou", "bats": "L", "throws": "R",
-                                       "position": "1B", "team_id": 111}]
+                                       "position": "1B", "team_id": 111, "birth_date": "1996-04-02"}]
+
+
+def test_parse_umpire_and_game_meta():
+    from mps.data.mlb_api import parse_umpire
+    payload = {"liveData": {"boxscore": {"officials": [
+        {"official": {"id": 427044, "fullName": "Joe West"}, "officialType": "First Base"},
+        {"official": {"id": 484183, "fullName": "Pat Hoberg"}, "officialType": "Home Plate"},
+    ]}}}
+    assert parse_umpire(payload) == {"hp_umpire_id": 484183, "hp_umpire_name": "Pat Hoberg"}
+    assert parse_umpire({}) == {"hp_umpire_id": None, "hp_umpire_name": None}
 
 
 def _player(pid, name, batting=None, pitching=None, order=None):

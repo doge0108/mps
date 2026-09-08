@@ -9,16 +9,18 @@ import pandas as pd
 from ..config import BATTING_TARGETS, PITCHING_TARGETS
 from ..data.store import Dataset
 from .lineups import lineup_features, starters_from_lines
+from .priors import age_on, batter_priors, pitcher_priors
 from .states import (asof_join, batter_split_state, batter_state, hand_code, pitcher_state, split_key,
-                     team_state)
+                     statcast_batter_state, statcast_pitcher_state, team_state, umpire_state)
 
 META_COLS = {"game_pk", "date", "player_id", "player_name", "team_id", "opp_team_id", "opp_sp_id",
              "season", "home_team_id", "away_team_id", "home_sp_id", "away_sp_id", "venue_id",
              "status", "game_type", "home_score", "away_score", "day_night", "wind_dir", "condition",
-             "bats", "opp_hand", "throws"}
+             "bats", "opp_hand", "throws", "hp_umpire_id", "hp_umpire_name"}
+GAME_CONTEXT_COLS = ["temp_f", "wind_mph", "wind_dir", "condition", "day_night", "hp_umpire_id"]
 
 LINEUP_COLS = ["lu_avg_r30", "lu_slg_r30", "lu_hr_rate_r30", "lu_k_rate_r30", "lu_bb_rate_r30",
-               "lu_form_slg", "lu_lhb_share", "lu_shb_share", "lu_known", "lu_size"]
+               "lu_form_slg", "lu_lhb_share", "lu_shb_share", "lu_known", "lu_size", "lu_xwoba_r30", "lu_ev_r30"]
 
 
 @dataclass
@@ -28,16 +30,30 @@ class States:
     teams: pd.DataFrame
     splits: pd.DataFrame
     players: pd.DataFrame = field(default_factory=pd.DataFrame)
+    sc_batters: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["player_id", "date"]))
+    sc_pitchers: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["player_id", "date"]))
+    umpires: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["hp_umpire_id", "date"]))
+    bat_priors: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["player_id", "date"]))
+    pit_priors: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["player_id", "date"]))
 
     @classmethod
     def from_dataset(cls, ds: Dataset) -> "States":
+        played = ds.played_games()
         return cls(
             batters=batter_state(ds.batting_lines),
             pitchers=pitcher_state(ds.pitching_lines),
             teams=team_state(ds.games, ds.pitching_lines),
             splits=batter_split_state(ds.batting_lines, ds.players),
             players=ds.players,
+            sc_batters=statcast_batter_state(ds.statcast_batting),
+            sc_pitchers=statcast_pitcher_state(ds.statcast_pitching),
+            umpires=umpire_state(played, ds.pitching_lines),
+            bat_priors=batter_priors(ds.batting_lines, played, ds.players),
+            pit_priors=pitcher_priors(ds.pitching_lines, played, ds.players),
         )
+
+    def age(self, player_ids: pd.Series, dates: pd.Series) -> pd.Series:
+        return age_on(dates, self.hand(player_ids, "birth_date"))
 
     def hand(self, player_ids: pd.Series, col: str) -> pd.Series:
         """Look up bats/throws for a series of player ids (NaN when unknown)."""
@@ -97,6 +113,9 @@ def assemble_batter_features(spec: pd.DataFrame, states: States) -> pd.DataFrame
     df = asof_join(df, states.pitchers, "opp_sp_id", "player_id", prefix="opp_")
     df = asof_join(df, states.teams, "team_id", "team_id", prefix="own_")
     df = asof_join(df, states.teams, "opp_team_id", "team_id", prefix="opp_")
+    df = _context_joins(df, states, "player_id", "opp_sp_id")
+    df["age"] = states.age(df["player_id"], df["date"]).to_numpy()
+    df["opp_sp_age"] = states.age(df["opp_sp_id"], df["date"]).to_numpy()
     # platoon: batter side vs. starter hand, and the batter's own rolling split vs. that hand
     df["bats"] = states.hand(df["player_id"], "bats")
     df["opp_hand"] = states.hand(df["opp_sp_id"], "throws")
@@ -118,9 +137,24 @@ def assemble_batter_features(spec: pd.DataFrame, states: States) -> pd.DataFrame
     return _finalise(df, ["b_last_date", "opp_p_last_date", "own_tm_last_date", "opp_tm_last_date"])
 
 
+def _context_joins(df: pd.DataFrame, states: States, batter_col: str | None, pitcher_col: str | None) -> pd.DataFrame:
+    """Statcast states, Marcel priors and umpire tendencies (all NaN-safe when tables are empty)."""
+    if batter_col:
+        df = asof_join(df, states.sc_batters, batter_col, "player_id")
+        df = asof_join(df, states.bat_priors, batter_col, "player_id")
+    if pitcher_col:
+        prefix = "" if pitcher_col == "player_id" else "opp_"
+        df = asof_join(df, states.sc_pitchers, pitcher_col, "player_id", prefix=prefix)
+        df = asof_join(df, states.pit_priors, pitcher_col, "player_id", prefix=prefix)
+    if "hp_umpire_id" not in df.columns:
+        df["hp_umpire_id"] = np.nan
+    df = asof_join(df, states.umpires, "hp_umpire_id", "hp_umpire_id")
+    return df
+
+
 def _spec_with_weather(lines: pd.DataFrame, games: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    wx = games[["game_pk", "temp_f", "wind_mph", "wind_dir", "condition", "day_night"]]
-    return lines[cols].merge(wx, on="game_pk", how="left")
+    ctx = games[["game_pk"] + GAME_CONTEXT_COLS]
+    return lines[cols].merge(ctx, on="game_pk", how="left")
 
 
 def build_batter_training(ds: Dataset, states: States | None = None) -> pd.DataFrame:
@@ -144,6 +178,8 @@ def assemble_pitcher_features(spec: pd.DataFrame, states: States, lineups: pd.Da
     df = asof_join(df, states.pitchers, "player_id", "player_id")
     df = asof_join(df, states.teams, "team_id", "team_id", prefix="own_")
     df = asof_join(df, states.teams, "opp_team_id", "team_id", prefix="opp_")
+    df = _context_joins(df, states, None, "player_id")
+    df["age"] = states.age(df["player_id"], df["date"]).to_numpy()
     df["throws_code"] = hand_code(states.hand(df["player_id"], "throws"))
     df = _merge_lineup(df, lineups, states, "opp_team_id", "opplu_")
     df["month"] = df["date"].dt.month
@@ -160,7 +196,7 @@ def _merge_lineup(df: pd.DataFrame, lineups: pd.DataFrame | None, states: States
         for c in cols:
             df[c] = np.nan
         return df
-    lf = lineup_features(lineups, states.batters, states.players)
+    lf = lineup_features(lineups, states.batters, states.players, states.sc_batters)
     lf = lf.rename(columns={c: f"{prefix}{c[3:]}" for c in LINEUP_COLS})
     lf = lf.rename(columns={"team_id": team_col})
     out = df.merge(lf, on=["game_pk", team_col], how="left")
@@ -195,6 +231,13 @@ def assemble_game_features(spec: pd.DataFrame, states: States, lineups: pd.DataF
     df = asof_join(df, states.pitchers, "away_sp_id", "player_id", prefix="asp_")
     df["hsp_throws_code"] = hand_code(states.hand(df["home_sp_id"], "throws"))
     df["asp_throws_code"] = hand_code(states.hand(df["away_sp_id"], "throws"))
+    df = asof_join(df, states.sc_pitchers, "home_sp_id", "player_id", prefix="hsp_")
+    df = asof_join(df, states.sc_pitchers, "away_sp_id", "player_id", prefix="asp_")
+    df = asof_join(df, states.pit_priors, "home_sp_id", "player_id", prefix="hsp_")
+    df = asof_join(df, states.pit_priors, "away_sp_id", "player_id", prefix="asp_")
+    df = _context_joins(df, states, None, None)
+    df["sp_velo_gap"] = df["hsp_scp_velo_r10"] - df["asp_scp_velo_r10"] if "hsp_scp_velo_r10" in df else np.nan
+    df["bp_fatigue_gap"] = df["home_tm_bp_b2b_last"] - df["away_tm_bp_b2b_last"] if "home_tm_bp_b2b_last" in df else np.nan
     df = _merge_lineup(df, lineups, states, "home_team_id", "hlu_")
     df = _merge_lineup(df, lineups, states, "away_team_id", "alu_")
     df["lu_slg_gap"] = df["hlu_slg_r30"] - df["alu_slg_r30"]
@@ -217,8 +260,8 @@ def assemble_game_features(spec: pd.DataFrame, states: States, lineups: pd.DataF
 def build_game_training(ds: Dataset, states: States | None = None) -> pd.DataFrame:
     states = states or States.from_dataset(ds)
     games = ds.played_games().reset_index(drop=True)
-    spec = games[["game_pk", "date", "season", "home_team_id", "away_team_id", "home_sp_id", "away_sp_id",
-                  "temp_f", "wind_mph", "wind_dir", "condition", "day_night"]].copy()
+    spec = games[["game_pk", "date", "season", "home_team_id", "away_team_id", "home_sp_id", "away_sp_id"]
+                 + GAME_CONTEXT_COLS].copy()
     feats = assemble_game_features(spec, states, starters_from_lines(ds.batting_lines))
     feats["y_home_win"] = (games["home_score"] > games["away_score"]).astype(int).to_numpy()
     feats["y_home_runs"] = games["home_score"].astype(float).to_numpy()

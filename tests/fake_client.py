@@ -114,11 +114,26 @@ class FakeClient(MLBStatsClient):
         src = self.ds.games if final else self.upcoming
         g = src[src["game_pk"] == game_pk]
         if g.empty:
-            return {"condition": None, "temp_f": None, "wind_mph": None, "wind_dir": None, "day_night": None}
+            return {"condition": None, "temp_f": None, "wind_mph": None, "wind_dir": None, "day_night": None,
+                    "hp_umpire_id": None, "hp_umpire_name": None}
         g = g.iloc[0]
+        ump = g.get("hp_umpire_id")
         return {"condition": g.get("condition"), "temp_f": g.get("temp_f"), "wind_mph": g.get("wind_mph"),
-                "wind_dir": g.get("wind_dir"), "day_night": g.get("day_night")}
+                "wind_dir": g.get("wind_dir"), "day_night": g.get("day_night"),
+                "hp_umpire_id": None if ump is None or pd.isna(ump) else int(ump),
+                "hp_umpire_name": g.get("hp_umpire_name")}
+
+    def statcast_range(self, start, end, **kw):
+        """Stand-in for ``fetch_statcast_range``: serve the simulator's aggregates for a date window."""
+        self.calls.append(f"statcast {start} {end}")
+        s, e = pd.Timestamp(start), pd.Timestamp(end)
+        b = self.ds.statcast_batting
+        p = self.ds.statcast_pitching
+        return (b[(b["date"] >= s) & (b["date"] <= e)].reset_index(drop=True),
+                p[(p["date"] >= s) & (p["date"] <= e)].reset_index(drop=True))
 
     def players(self, season):
         self.calls.append(f"players {season}")
-        return self.ds.players.to_dict("records")
+        out = self.ds.players.copy()
+        out["birth_date"] = out["birth_date"].dt.strftime("%Y-%m-%d")
+        return out.to_dict("records")

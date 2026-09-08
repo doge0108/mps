@@ -17,24 +17,42 @@ def _add_dirs(p: argparse.ArgumentParser) -> None:
     p.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR, help="where trained models are stored")
 
 
+def parse_seasons(tokens: list[str]) -> list[int]:
+    """'2018-2021 2024' -> [2018, 2019, 2020, 2021, 2024]."""
+    out: list[int] = []
+    for tok in tokens:
+        if "-" in tok:
+            a, b = tok.split("-", 1)
+            out.extend(range(int(a), int(b) + 1))
+        else:
+            out.append(int(tok))
+    return sorted(set(out))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mps", description="MLB player-stat and game-outcome prediction")
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("fetch", help="download real seasons from the MLB Stats API (in-progress seasons OK)")
-    p.add_argument("seasons", nargs="+", type=int)
+    p.add_argument("seasons", nargs="+", help="e.g. 2018-2026 or 2024 2025 2026")
     p.add_argument("--postseason", action="store_true", help="include postseason games")
-    p.add_argument("--no-weather", action="store_true", help="skip the per-game weather request")
+    p.add_argument("--no-weather", action="store_true", help="skip the per-game weather/umpire request")
+    p.add_argument("--no-statcast", action="store_true", help="skip Baseball Savant Statcast downloads")
     _add_dirs(p)
 
     p = sub.add_parser("update", help="incremental refresh: new results since last stored game + upcoming schedule")
     p.add_argument("--days-ahead", type=int, default=7, help="how many days of upcoming games to store")
     p.add_argument("--no-weather", action="store_true")
+    p.add_argument("--no-statcast", action="store_true")
+    _add_dirs(p)
+
+    p = sub.add_parser("statcast", help="(re)download Statcast aggregates for stored seasons")
+    p.add_argument("seasons", nargs="*", help="seasons to fetch (default: every stored season)")
     _add_dirs(p)
 
     p = sub.add_parser("simulate", help="generate simulated seasons (offline development / testing)")
-    p.add_argument("seasons", nargs="+", type=int)
+    p.add_argument("seasons", nargs="+")
     p.add_argument("--games-per-team", type=int, default=162)
     p.add_argument("--seed", type=int, default=7)
     _add_dirs(p)
@@ -93,7 +111,8 @@ def _live_schedule(date: str) -> pd.DataFrame | None:
 def cmd_fetch(args) -> int:
     from .data.ingest import fetch_seasons
     types = ("R", "P") if args.postseason else ("R",)
-    ds = fetch_seasons(args.seasons, args.data_dir, game_types=types, weather=not args.no_weather)
+    ds = fetch_seasons(parse_seasons(args.seasons), args.data_dir, game_types=types, weather=not args.no_weather,
+                       statcast=not args.no_statcast)
     print(f"Saved {len(ds.games)} games / {len(ds.batting_lines)} batting / {len(ds.pitching_lines)} pitching lines "
           f"to {args.data_dir}")
     return 0
@@ -101,7 +120,7 @@ def cmd_fetch(args) -> int:
 
 def cmd_update(args) -> int:
     from .data.ingest import update
-    ds = update(args.data_dir, days_ahead=args.days_ahead, weather=not args.no_weather)
+    ds = update(args.data_dir, days_ahead=args.days_ahead, weather=not args.no_weather, statcast=not args.no_statcast)
     up = ds.upcoming_games()
     print(f"Dataset now has {len(ds.played_games())} completed games (latest {ds.played_games()['date'].max().date()}) "
           f"and {len(up)} upcoming games -> {args.data_dir}")
@@ -109,14 +128,34 @@ def cmd_update(args) -> int:
     return 0
 
 
+def cmd_statcast(args) -> int:
+    from .data.ingest import fetch_statcast
+    from .data.store import Dataset, normalise
+    ds = Dataset.load(args.data_dir)
+    seasons = parse_seasons(args.seasons) if args.seasons else ds.seasons()
+    played = ds.played_games()
+    for season in seasons:
+        g = played[played["season"] == season]
+        if g.empty:
+            print(f"no stored games for {season}; run `mps fetch {season}` first")
+            continue
+        bat, pit = fetch_statcast(g["date"].min().date(), g["date"].max().date(), args.data_dir)
+        add = Dataset(games=ds.games.iloc[:0], batting_lines=ds.batting_lines.iloc[:0],
+                      pitching_lines=ds.pitching_lines.iloc[:0], statcast_batting=bat, statcast_pitching=pit)
+        ds = ds.concat(add)
+    ds.save(args.data_dir)
+    print(f"Statcast rows stored: {len(ds.statcast_batting)} batter-games, {len(ds.statcast_pitching)} pitcher-games")
+    return 0
+
+
 def cmd_simulate(args) -> int:
     from .data.simulate import simulate_dataset
     from .data.store import Dataset
-    ds = simulate_dataset(args.seasons, args.games_per_team, seed=args.seed)
+    ds = simulate_dataset(parse_seasons(args.seasons), args.games_per_team, seed=args.seed)
     if (args.data_dir / "games.csv").exists():
         ds = Dataset.load(args.data_dir).concat(ds)
     ds.save(args.data_dir)
-    print(f"Simulated seasons {args.seasons}: {len(ds.games)} games, {len(ds.batting_lines)} batting lines, "
+    print(f"Simulated seasons {parse_seasons(args.seasons)}: {len(ds.games)} games, {len(ds.batting_lines)} batting lines, "
           f"{len(ds.pitching_lines)} pitching lines -> {args.data_dir}")
     return 0
 
@@ -165,6 +204,18 @@ def cmd_predict_player(args) -> int:
     if result.get("weather"):
         from .predict import _weather_text
         print(f"  Weather: {_weather_text(result['weather'])}")
+    if result.get("umpire"):
+        u = result["umpire"]
+        tend = ""
+        if u.get("k_rate_vs_league") is not None:
+            tend = (f" -- K rate {u['k_rate_vs_league']:+.3f}, BB rate {u['bb_rate_vs_league']:+.3f} vs league "
+                    f"over {u['games']} games")
+        print(f"  Umpire: {u['name'] or u['id']}{tend}")
+    if result.get("opp_bullpen"):
+        bp = result["opp_bullpen"]
+        print(f"  Opposing bullpen: {bp['arms_used_last_game']} arms / {bp['pitches_last_game']} pitches last game, "
+              f"{bp['pitches_last_3']} pitches over last 3, {bp['back_to_back_arms']} arms on back-to-back days, "
+              f"{bp['top3_used_last_game']}/3 top relievers used yesterday")
     if "batting" in result:
         b = result["batting"]
         hand = f" ({b['opposing_starter_hand']}HP)" if b["opposing_starter_hand"] else ""
@@ -182,6 +233,21 @@ def cmd_predict_player(args) -> int:
             split_txt = (f", vs {split['vs_hand']}HP last {split['games']} g: AVG {split['avg']:.3f} SLG {split['slg']:.3f}"
                          if split and split["avg"] is not None else "")
             print(f"  Platoon: bats {b['bats']}{', ' + adv if adv else ''}{split_txt}")
+        if result.get("age"):
+            pr = b.get("prior")
+            prior_txt = (f"; preseason projection AVG {pr['avg']:.3f} SLG {pr['slg']:.3f} HR/PA {pr['hr_rate']:.3f} "
+                         f"(reliability {pr['reliability']:.2f})") if pr else ""
+            print(f"  Age {result['age']}{prior_txt}")
+        c = b.get("contact")
+        if c and c["ev_r30"] is not None:
+            print(f"  Contact (Statcast): EV {c['ev_r30']} mph (last 5 g {c['ev_r5']}, form {c['ev_form']:+.1f}), "
+                  f"hard-hit {c['hard_hit_r30']:.0%}, barrel {c['barrel_r30']:.1%}, xwOBA {c['xwoba_r30']:.3f}, "
+                  f"whiff {c['whiff_r30']:.0%}, chase {c['chase_r30']:.0%}")
+        st = b.get("opposing_starter_stuff")
+        if st and st["velo_r10"] is not None:
+            print(f"  Opposing starter stuff: FB {st['velo_r10']} mph (last start {st['velo_last']}, "
+                  f"{st['velo_delta_vs_r30']:+.2f} vs season), whiff {st['whiff_r10']:.0%}, CSW {st['csw_r10']:.0%}, "
+                  f"EV allowed {st['ev_allowed_r30']}, barrel allowed {st['barrel_allowed_r30']:.1%}")
         f = b["form"]
         if f:
             l5 = f["last5"]
@@ -198,6 +264,17 @@ def cmd_predict_player(args) -> int:
             print(f"  Pitching form: {f['label'].upper()} -- last 3 starts ERA {f['last3']['era']}, "
                   f"K% {f['last3']['k_rate']} (30-app baseline ERA {f['baseline30']['era']}, "
                   f"K% {f['baseline30']['k_rate']}); QS streak {f['quality_start_streak']}, rest {f['days_rest']} d")
+        if result.get("age"):
+            pr = p.get("prior")
+            prior_txt = (f"; preseason projection ERA {pr['era']:.2f} K% {pr['k_rate']:.3f} BB% {pr['bb_rate']:.3f} "
+                         f"(reliability {pr['reliability']:.2f})") if pr else ""
+            print(f"  Age {result['age']}{prior_txt}")
+        st = p.get("stuff")
+        if st and st["velo_r10"] is not None:
+            print(f"  Stuff (Statcast): FB {st['velo_r10']} mph (last start {st['velo_last']}, "
+                  f"{st['velo_delta_vs_r30']:+.2f} vs season), whiff {st['whiff_r10']:.0%}, CSW {st['csw_r10']:.0%}, "
+                  f"EV allowed {st['ev_allowed_r30']}, barrel allowed {st['barrel_allowed_r30']:.1%}, "
+                  f"xwOBA allowed {st['xwoba_allowed_r30']:.3f}")
         if p.get("opposing_lineup_lhb_share") is not None:
             print(f"  Opposing lineup: {p['opposing_lineup_lhb_share']:.0%} left-handed bats")
         print(f"  Pitching, expected: IP {p['innings_pitched']}, " +
@@ -242,16 +319,24 @@ def cmd_info(args) -> int:
     if len(up):
         print(f"upcoming games: {len(up)}  ({up['date'].min().date()} .. {up['date'].max().date()}), "
               f"announced lineup slots: {len(ds.lineups)}")
-    print(f"players with handedness: {int(ds.players['bats'].notna().sum()) if len(ds.players) else 0}")
+    print(f"players with handedness: {int(ds.players['bats'].notna().sum()) if len(ds.players) else 0}, "
+          f"with birth date: {int(ds.players['birth_date'].notna().sum()) if len(ds.players) else 0}")
     wx = played["temp_f"].notna().mean() if len(played) else 0
-    print(f"games with weather: {wx:.0%}")
+    ump = played["hp_umpire_id"].notna().mean() if len(played) else 0
+    print(f"games with weather: {wx:.0%}, with home-plate umpire: {ump:.0%}")
+    sc = ds.statcast_batting
+    if len(sc):
+        print(f"statcast: {len(sc)} batter-games, {len(ds.statcast_pitching)} pitcher-games "
+              f"({sc['date'].min().date()} .. {sc['date'].max().date()})")
+    else:
+        print("statcast: none (run `mps statcast` to download quality-of-contact data)")
     print(f"batting lines: {len(ds.batting_lines)}  players: {ds.batting_lines['player_id'].nunique()}")
     print(f"pitching lines: {len(ds.pitching_lines)}  pitchers: {ds.pitching_lines['player_id'].nunique()}")
     return 0
 
 
 COMMANDS = {
-    "fetch": cmd_fetch, "update": cmd_update, "simulate": cmd_simulate, "train": cmd_train, "evaluate": cmd_evaluate,
+    "fetch": cmd_fetch, "update": cmd_update, "statcast": cmd_statcast, "simulate": cmd_simulate, "train": cmd_train, "evaluate": cmd_evaluate,
     "predict-player": cmd_predict_player, "predict-game": cmd_predict_game, "players": cmd_players,
     "info": cmd_info,
 }

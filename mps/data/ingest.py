@@ -9,6 +9,7 @@ import pandas as pd
 
 from ..config import DEFAULT_DATA_DIR
 from .mlb_api import MLBStatsClient, parse_boxscore, parse_boxscore_lineups, parse_schedule, parse_schedule_lineups
+from .statcast import fetch_statcast_range
 from .store import Dataset, empty_lineups, empty_players, normalise
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ def _fetch_finals(client: MLBStatsClient, sched_rows: list[dict], weather: bool,
     return games, batting, pitching
 
 
-def _to_dataset(games, batting, pitching, players=None, lineups=None) -> Dataset:
+def _to_dataset(games, batting, pitching, players=None, lineups=None, statcast=None) -> Dataset:
     frames = {
         "games": pd.DataFrame(games),
         "batting_lines": pd.DataFrame(batting),
@@ -53,7 +54,18 @@ def _to_dataset(games, batting, pitching, players=None, lineups=None) -> Dataset
         "players": pd.DataFrame(players) if players else empty_players(),
         "lineups": pd.DataFrame(lineups) if lineups else empty_lineups(),
     }
+    if statcast is not None:
+        frames["statcast_batting"], frames["statcast_pitching"] = statcast
     return Dataset(**normalise(frames))
+
+
+def fetch_statcast(start: _date, end: _date, data_dir: Path, today: _date | None = None,
+                   progress: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Statcast aggregates between two dates (cached per window under data/raw)."""
+    print(f"Fetching Statcast {start} .. {end} ...")
+    bat, pit = fetch_statcast_range(start, end, cache_dir=Path(data_dir) / "raw", today=today, progress=progress)
+    print(f"  {len(bat)} batter-games, {len(pit)} pitcher-games with Statcast data")
+    return bat, pit
 
 
 def fetch_range(client: MLBStatsClient, start: str, end: str, game_types=("R",), weather: bool = True,
@@ -79,7 +91,7 @@ def fetch_season(client: MLBStatsClient, season: int, game_types=("R",), weather
 
 
 def fetch_seasons(seasons: list[int], data_dir: Path = DEFAULT_DATA_DIR, client: MLBStatsClient | None = None,
-                  game_types=("R",), weather: bool = True) -> Dataset:
+                  game_types=("R",), weather: bool = True, statcast: bool = True) -> Dataset:
     data_dir = Path(data_dir)
     client = client or MLBStatsClient(cache_dir=data_dir / "raw")
     combined: Dataset | None = None
@@ -87,6 +99,10 @@ def fetch_seasons(seasons: list[int], data_dir: Path = DEFAULT_DATA_DIR, client:
         print(f"Fetching {season} ...")
         ds = fetch_season(client, season, game_types, weather)
         print(f"  {len(ds.games)} games, {len(ds.batting_lines)} batting lines, {len(ds.pitching_lines)} pitching lines")
+        if statcast and len(ds.games):
+            start, end = ds.games["date"].min().date(), ds.games["date"].max().date()
+            ds.statcast_batting, ds.statcast_pitching = fetch_statcast(start, end, data_dir, client.today)
+            ds = Dataset(**normalise(ds.__dict__))
         combined = ds if combined is None else combined.concat(ds)
     assert combined is not None
     if (data_dir / "games.csv").exists():
@@ -122,7 +138,7 @@ def fetch_upcoming(client: MLBStatsClient, start: str, end: str, weather: bool =
 
 
 def update(data_dir: Path = DEFAULT_DATA_DIR, days_ahead: int = 7, client: MLBStatsClient | None = None,
-           weather: bool = True, game_types=("R",)) -> Dataset:
+           weather: bool = True, game_types=("R",), statcast: bool = True) -> Dataset:
     """Incremental refresh: new final games since the last stored game, plus the upcoming schedule.
 
     Safe to run every day during the season; upcoming rows are replaced by their box scores
@@ -144,6 +160,11 @@ def update(data_dir: Path = DEFAULT_DATA_DIR, days_ahead: int = 7, client: MLBSt
         new.players = pd.DataFrame(client.players(today.year))
     except Exception as exc:  # pragma: no cover - network
         log.warning("could not refresh player list: %s", exc)
+    if statcast and len(new.games):
+        sc_start = start
+        if len(existing.statcast_batting):
+            sc_start = max(start, existing.statcast_batting["date"].max().date() - timedelta(days=1))
+        new.statcast_batting, new.statcast_pitching = fetch_statcast(sc_start, today, data_dir, today)
     new = Dataset(**normalise(new.__dict__))
     end = today + timedelta(days=days_ahead)
     print(f"Fetching upcoming schedule {today} .. {end} ...")

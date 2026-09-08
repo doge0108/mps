@@ -19,6 +19,7 @@ from .models.player_model import add_probabilities
 from .models.registry import ModelBundle
 
 WEATHER_COLS = ["temp_f", "wind_mph", "wind_dir", "condition", "day_night"]
+CONTEXT_COLS = WEATHER_COLS + ["hp_umpire_id", "hp_umpire_name"]
 
 
 @dataclass
@@ -104,7 +105,7 @@ class Predictor:
         date = pd.Timestamp(date).normalize()
         src = schedule if schedule is not None else self.ds.games
         out = src[pd.to_datetime(src["date"]).dt.normalize() == date].reset_index(drop=True)
-        for col in WEATHER_COLS:
+        for col in CONTEXT_COLS:
             if col not in out.columns:
                 out[col] = np.nan
         return out
@@ -161,6 +162,8 @@ class Predictor:
                     "opp_sp_id": self._probable_starter(opp, date) if pd.isna(opp_sp) else int(opp_sp),
                     "own_sp_id": self._probable_starter(team_id, date) if pd.isna(own_sp) else int(own_sp),
                     "weather": {c: (None if pd.isna(g[c]) else g[c]) for c in WEATHER_COLS},
+                    "hp_umpire_id": None if pd.isna(g["hp_umpire_id"]) else int(g["hp_umpire_id"]),
+                    "hp_umpire_name": None if pd.isna(g["hp_umpire_name"]) else str(g["hp_umpire_name"]),
                     "status": g.get("status")}
         if opponent is not None:
             opp = resolve_team(opponent)
@@ -168,10 +171,12 @@ class Predictor:
             return {"source": "manual", "game_pk": None, "is_home": home, "opp_team_id": opp,
                     "opp_sp_id": self._probable_starter(opp, date),
                     "own_sp_id": self._probable_starter(team_id, date),
-                    "weather": {c: None for c in WEATHER_COLS}, "status": None}
+                    "weather": {c: None for c in WEATHER_COLS}, "hp_umpire_id": None, "hp_umpire_name": None,
+                    "status": None}
         return {"source": "unknown", "game_pk": None, "is_home": 1 if is_home is None else int(is_home),
                 "opp_team_id": None, "opp_sp_id": None, "own_sp_id": None,
-                "weather": {c: None for c in WEATHER_COLS}, "status": None}
+                "weather": {c: None for c in WEATHER_COLS}, "hp_umpire_id": None, "hp_umpire_name": None,
+                "status": None}
 
     # --------------------------------------------------------------- form
     def batter_form(self, player_id: int, date: pd.Timestamp) -> dict | None:
@@ -232,6 +237,66 @@ class Predictor:
                 "slg": _safe_round(s["sp_slg"]), "hr_rate": _safe_round(s["sp_hr_rate"]),
                 "k_rate": _safe_round(s["sp_k_rate"])}
 
+    def _latest(self, table: pd.DataFrame, key: str, value, date: pd.Timestamp) -> pd.Series | None:
+        if table is None or table.empty or value is None or pd.isna(value):
+            return None
+        rows = table[(table[key] == value) & (table["date"] < date)]
+        return None if rows.empty else rows.iloc[-1]
+
+    def umpire_info(self, ump_id: int | None, name: str | None, date: pd.Timestamp) -> dict | None:
+        if ump_id is None:
+            return None
+        s = self._latest(self.states.umpires, "hp_umpire_id", ump_id, date)
+        info = {"name": name, "id": int(ump_id)}
+        if s is not None:
+            info.update({"games": int(s["ump_games"]), "k_rate_vs_league": _safe_round(s["ump_k_rate_r100"]),
+                         "bb_rate_vs_league": _safe_round(s["ump_bb_rate_r100"])})
+        return info
+
+    def batter_contact(self, player_id: int, date: pd.Timestamp) -> dict | None:
+        s = self._latest(self.states.sc_batters, "player_id", player_id, date)
+        if s is None:
+            return None
+        return {"ev_r30": _safe_round(s["sc_ev_r30"], 1), "ev_r5": _safe_round(s["sc_ev_r5"], 1),
+                "ev_max_r15": _safe_round(s["sc_ev_max_r15"], 1), "hard_hit_r30": _safe_round(s["sc_hard_hit_r30"]),
+                "barrel_r30": _safe_round(s["sc_barrel_r30"]), "xwoba_r30": _safe_round(s["sc_xwoba_r30"]),
+                "xba_r30": _safe_round(s["sc_xba_r30"]), "whiff_r30": _safe_round(s["sc_whiff_r30"]),
+                "chase_r30": _safe_round(s["sc_chase_r30"]), "ev_form": _safe_round(s["sc_form_ev"], 1)}
+
+    def pitcher_stuff(self, player_id: int | None, date: pd.Timestamp) -> dict | None:
+        s = self._latest(self.states.sc_pitchers, "player_id", player_id, date)
+        if s is None:
+            return None
+        return {"velo_r10": _safe_round(s["scp_velo_r10"], 1), "velo_last": _safe_round(s["scp_velo_last"], 1),
+                "velo_delta_vs_r30": _safe_round(s["scp_velo_delta"], 2), "whiff_r10": _safe_round(s["scp_whiff_r10"]),
+                "csw_r10": _safe_round(s["scp_csw_r10"]), "ev_allowed_r30": _safe_round(s["scp_ev_allowed_r30"], 1),
+                "barrel_allowed_r30": _safe_round(s["scp_barrel_allowed_r30"]),
+                "xwoba_allowed_r30": _safe_round(s["scp_xwoba_allowed_r30"])}
+
+    def player_prior(self, player_id: int, date: pd.Timestamp, batter: bool) -> dict | None:
+        table = self.states.bat_priors if batter else self.states.pit_priors
+        s = self._latest(table, "player_id", player_id, date)
+        if s is None:
+            return None
+        pre = "mc_" if batter else "mcp_"
+        keys = ("avg", "slg", "hr_rate", "k_rate", "bb_rate") if batter else ("era", "k_rate", "bb_rate", "hr_rate")
+        return {"season": int(pd.Timestamp(s["date"]).year), "reliability": _safe_round(s[f"{pre}reliability"], 2),
+                **{k: _safe_round(s[f"{pre}{k}"], 3) for k in keys}}
+
+    def player_age(self, player_id: int, date: pd.Timestamp) -> float | None:
+        a = self.states.age(pd.Series([player_id]), pd.Series([date])).iloc[0]
+        return None if pd.isna(a) else round(float(a), 1)
+
+    def bullpen_status(self, team_id: int | None, date: pd.Timestamp) -> dict | None:
+        s = self._latest(self.states.teams, "team_id", team_id, date)
+        if s is None or "tm_bp_arms_last" not in s.index:
+            return None
+        return {"rest_days": int((date - pd.Timestamp(s["tm_last_date"])).days),
+                "arms_used_last_game": int(s["tm_bp_arms_last"]), "pitches_last_game": int(s["tm_bp_pitches_last"]),
+                "pitches_last_3": int(s["tm_bp_pitches_r3"]), "back_to_back_arms": int(s["tm_bp_b2b_last"]),
+                "top3_used_last_game": int(s["tm_bp_top3_used_last"]),
+                "bullpen_era_r30": _safe_round(s.get("tm_bullpen_era_r30"), 2)}
+
     # ------------------------------------------------------------ players
     def predict_player(self, player: str, date: str | pd.Timestamp, opponent: str | int | None = None,
                        is_home: int | None = None, batting_order: int | None = None,
@@ -244,9 +309,12 @@ class Predictor:
             "date": date.strftime("%Y-%m-%d"),
             "opponent": team_label(ctx["opp_team_id"]) if ctx["opp_team_id"] is not None else None,
             "is_home": bool(ctx["is_home"]), "context_source": ctx["source"],
+            "age": self.player_age(match.player_id, date),
             "weather": ctx["weather"] if any(v is not None for v in ctx["weather"].values()) else None,
+            "umpire": self.umpire_info(ctx["hp_umpire_id"], ctx["hp_umpire_name"], date),
+            "opp_bullpen": self.bullpen_status(ctx["opp_team_id"], date),
         }
-        wx = {c: ctx["weather"].get(c) for c in WEATHER_COLS}
+        wx = {c: ctx["weather"].get(c) for c in WEATHER_COLS} | {"hp_umpire_id": ctx["hp_umpire_id"]}
         opp_team = ctx["opp_team_id"] if ctx["opp_team_id"] is not None else -1
         if match.is_batter:
             lineup, lineup_source = self.lineup_for(ctx["game_pk"], match.team_id, date)
@@ -278,6 +346,9 @@ class Predictor:
                 "batting_order": order,
                 "lineup": {"source": lineup_source, "in_lineup": in_lineup},
                 "form": self.batter_form(match.player_id, date),
+                "contact": self.batter_contact(match.player_id, date),
+                "prior": self.player_prior(match.player_id, date, batter=True),
+                "opposing_starter_stuff": self.pitcher_stuff(ctx["opp_sp_id"], date),
                 "expected": {t: round(float(row[t]), 3) for t in BATTING_TARGETS},
                 "probabilities": {
                     "hit": round(float(row["p_h_ge1"]), 3), "multi_hit": round(float(row["p_h_ge2"]), 3),
@@ -298,12 +369,15 @@ class Predictor:
             feats = assemble_pitcher_features(spec, self.states, lineups)
             row = self.models.pitcher.predict(feats).iloc[0]
             outs = float(row["outs"])
+            outs_int = int(round(outs))
             result["pitching"] = {
                 "throws": self._hand(match.player_id, "throws"),
                 "form": self.pitcher_form(match.player_id, date),
+                "stuff": self.pitcher_stuff(match.player_id, date),
+                "prior": self.player_prior(match.player_id, date, batter=False),
                 "opposing_lineup_lhb_share": _safe_round(feats["opplu_lhb_share"].iloc[0], 2),
                 "expected": {t: round(float(row[t]), 3) for t in PITCHING_TARGETS},
-                "innings_pitched": f"{int(outs // 3)}.{int(round(outs % 3))}",
+                "innings_pitched": f"{outs_int // 3}.{outs_int % 3}",
                 "probabilities": {
                     "quality_start": round(_quality_start_prob(outs, float(row["er"])), 3),
                     "strikeouts_ge6": round(float(sps.poisson.sf(5, max(float(row["so"]), 1e-6))), 3),
@@ -321,7 +395,7 @@ class Predictor:
             games = pd.DataFrame([{
                 "game_pk": np.nan, "date": date, "home_team_id": h, "away_team_id": a,
                 "home_sp_id": self._probable_starter(h, date), "away_sp_id": self._probable_starter(a, date),
-                **{c: np.nan for c in WEATHER_COLS},
+                **{c: np.nan for c in CONTEXT_COLS},
             }])
         else:
             games = self.games_on(date, schedule)
@@ -343,7 +417,8 @@ class Predictor:
                 lineup_rows.append(self._lineup_rows(key, tid, date, pk))
                 lineup_src.append(self.lineup_for(pk, tid, date)[1])
         lineups = pd.concat(lineup_rows, ignore_index=True) if lineup_rows else None
-        spec = games[["date", "home_team_id", "away_team_id", "home_sp_id", "away_sp_id"] + WEATHER_COLS].copy()
+        spec = games[["date", "home_team_id", "away_team_id", "home_sp_id", "away_sp_id"] + WEATHER_COLS
+                     + ["hp_umpire_id"]].copy()
         spec.insert(0, "game_pk", keys)
         feats = assemble_game_features(spec, self.states, lineups)
         pred = summarise_game_predictions(self.models.game.predict(feats))
@@ -361,6 +436,7 @@ class Predictor:
             "exp_total_runs": pred["total_runs"].round(2),
             "predicted_winner": np.where(pred["home_win_prob"] >= 0.5, home_lbl, away_lbl),
             "lineups": [f"{lineup_src[2 * i][:4]}/{lineup_src[2 * i + 1][:4]}" for i in range(len(games))],
+            "umpire": [("" if pd.isna(u) else str(u)) for u in games["hp_umpire_name"]],
             "weather": [_weather_text(g) for g in games.to_dict("records")],
         })
         if "home_score" in games.columns and games["home_score"].notna().any():

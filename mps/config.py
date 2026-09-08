@@ -22,8 +22,21 @@ GAMES_COLUMNS = [
     "home_sp_id", "away_sp_id", "venue_id", "status",
     # weather / time of day (NaN when unknown)
     "day_night", "temp_f", "wind_mph", "wind_dir", "condition",
+    # home-plate umpire (NaN when unknown)
+    "hp_umpire_id", "hp_umpire_name",
 ]
-PLAYERS_COLUMNS = ["player_id", "player_name", "bats", "throws", "position", "team_id"]
+PLAYERS_COLUMNS = ["player_id", "player_name", "bats", "throws", "position", "team_id", "birth_date"]
+
+# Statcast aggregates per player-game (from Baseball Savant pitch-level data).
+STATCAST_BATTING_COLUMNS = [
+    "game_pk", "date", "player_id", "pitches", "swings", "whiffs", "chases", "out_zone_pitches",
+    "bip", "ev_sum", "ev_max", "la_sum", "hard_hit", "barrels", "xba_sum", "xwoba_sum",
+]
+STATCAST_PITCHING_COLUMNS = [
+    "game_pk", "date", "player_id", "pitches", "fastballs", "fb_velo_sum", "fb_velo_max", "spin_sum",
+    "swings", "whiffs", "called_strikes", "chases", "out_zone_pitches",
+    "bip", "ev_sum", "hard_hit", "barrels", "xwoba_sum",
+]
 LINEUPS_COLUMNS = ["game_pk", "date", "team_id", "player_id", "batting_order"]
 
 HAND_CODES = {"L": 1, "R": 2, "S": 3}
