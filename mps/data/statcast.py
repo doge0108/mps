@@ -53,20 +53,45 @@ def savant_params(start: str, end: str, player_type: str = "batter") -> dict:
     }
 
 
-def fetch_pitches(start: str, end: str, session: requests.Session | None = None, timeout: float = 120.0,
-                  cache_dir: Path | None = None, today: _date | None = None) -> pd.DataFrame:
-    """Pitch-level rows for [start, end] (inclusive); cached on disk when the window is in the past."""
+USER_AGENT = "Mozilla/5.0 (compatible; mps/0.1; +https://github.com/doge0108/mps)"
+
+
+def fetch_pitches(start: str, end: str, session: requests.Session | None = None, timeout: float = 180.0,
+                  cache_dir: Path | None = None, today: _date | None = None, max_retries: int = 4) -> pd.DataFrame:
+    """Pitch-level rows for [start, end] (inclusive); cached on disk when the window is in the past.
+
+    Empty or malformed responses are never cached, so a rate-limited window is retried next run.
+    """
     today = today or _date.today()
     cpath = None
     if cache_dir is not None and _date.fromisoformat(end) < today:
         cpath = Path(cache_dir) / f"statcast_{start}_{end}.csv.gz"
         if cpath.exists():
-            return pd.read_csv(cpath, low_memory=False)
+            cached = pd.read_csv(cpath, low_memory=False)
+            if len(cached):
+                return cached
     session = session or requests.Session()
-    resp = session.get(SAVANT_URL, params=savant_params(start, end), timeout=timeout)
-    resp.raise_for_status()
-    df = pd.read_csv(io.StringIO(resp.text), low_memory=False)
-    if cpath is not None:
+    session.headers.setdefault("User-Agent", USER_AGENT)
+    last_err: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            resp = session.get(SAVANT_URL, params=savant_params(start, end), timeout=timeout)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                raise requests.HTTPError(f"HTTP {resp.status_code} from Baseball Savant")
+            resp.raise_for_status()
+            text = resp.text
+            if not text.lstrip().startswith(("pitch_type", "\"pitch_type")) and "game_date" not in text[:2000]:
+                raise ValueError(f"unexpected response (not a Statcast CSV): {text[:120]!r}")
+            df = pd.read_csv(io.StringIO(text), low_memory=False)
+            break
+        except (requests.RequestException, ValueError) as exc:
+            last_err = exc
+            wait = 3 * 2 ** attempt
+            log.warning("statcast %s..%s attempt %d failed (%s); retrying in %ss", start, end, attempt + 1, exc, wait)
+            time.sleep(wait)
+    else:
+        raise RuntimeError(f"Baseball Savant request failed after {max_retries} attempts: {last_err}")
+    if cpath is not None and len(df):
         cpath.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(cpath, index=False, compression="gzip")
     return df
@@ -122,28 +147,41 @@ def aggregate_pitches(pitches: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame
 
 
 def fetch_statcast_range(start: _date, end: _date, cache_dir: Path | None = None, today: _date | None = None,
-                         session: requests.Session | None = None, pause: float = 1.0,
-                         progress: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """All Statcast aggregates between two dates, fetched in short windows."""
+                         session: requests.Session | None = None, pause: float = 2.0,
+                         progress: bool = True, verbose: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """All Statcast aggregates between two dates, fetched in short windows.
+
+    With ``verbose`` every window prints the number of pitch rows and the dates actually returned,
+    which is the quickest way to see whether Baseball Savant is rate-limiting or returning partial data.
+    """
     bats, pits = [], []
     cur = start
     n = 0
+    failed = 0
     while cur <= end:
         stop = min(cur + timedelta(days=WINDOW_DAYS - 1), end)
         try:
             pitches = fetch_pitches(cur.isoformat(), stop.isoformat(), session, cache_dir=cache_dir, today=today)
         except Exception as exc:  # pragma: no cover - network
             log.warning("statcast window %s..%s failed: %s", cur, stop, exc)
+            print(f"  statcast {cur}..{stop}: FAILED ({exc})")
             pitches = pd.DataFrame()
+            failed += 1
+        if verbose:
+            dates = sorted(pd.to_datetime(pitches["game_date"]).dt.date.unique()) if "game_date" in pitches else []
+            span = f"{dates[0]}..{dates[-1]}" if dates else "no games"
+            print(f"  statcast {cur}..{stop}: {len(pitches)} pitches, {len(dates)} dates ({span})")
         b, p = aggregate_pitches(pitches)
         bats.append(b)
         pits.append(p)
         n += 1
-        if progress and n % 10 == 0:
+        if progress and not verbose and n % 10 == 0:
             print(f"  statcast: through {stop}")
         cur = stop + timedelta(days=1)
         if pause:
             time.sleep(pause)
+    if failed:
+        print(f"  statcast: {failed} window(s) failed; rerun `mps statcast` later to fill them in")
     bat = pd.concat(bats, ignore_index=True) if bats else pd.DataFrame(columns=STATCAST_BATTING_COLUMNS)
     pit = pd.concat(pits, ignore_index=True) if pits else pd.DataFrame(columns=STATCAST_PITCHING_COLUMNS)
     return bat, pit

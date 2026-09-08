@@ -160,6 +160,7 @@ class Predictor:
             own_sp = g["home_sp_id" if home else "away_sp_id"]
             return {"source": "schedule", "game_pk": int(g["game_pk"]), "is_home": int(home), "opp_team_id": opp,
                     "opp_sp_id": self._probable_starter(opp, date) if pd.isna(opp_sp) else int(opp_sp),
+                    "opp_sp_source": "rotation_guess" if pd.isna(opp_sp) else "schedule",
                     "own_sp_id": self._probable_starter(team_id, date) if pd.isna(own_sp) else int(own_sp),
                     "weather": {c: (None if pd.isna(g[c]) else g[c]) for c in WEATHER_COLS},
                     "hp_umpire_id": None if pd.isna(g["hp_umpire_id"]) else int(g["hp_umpire_id"]),
@@ -169,7 +170,7 @@ class Predictor:
             opp = resolve_team(opponent)
             home = 1 if is_home is None else int(is_home)
             return {"source": "manual", "game_pk": None, "is_home": home, "opp_team_id": opp,
-                    "opp_sp_id": self._probable_starter(opp, date),
+                    "opp_sp_id": self._probable_starter(opp, date), "opp_sp_source": "rotation_guess",
                     "own_sp_id": self._probable_starter(team_id, date),
                     "weather": {c: None for c in WEATHER_COLS}, "hp_umpire_id": None, "hp_umpire_name": None,
                     "status": None}
@@ -300,10 +301,16 @@ class Predictor:
     # ------------------------------------------------------------ players
     def predict_player(self, player: str, date: str | pd.Timestamp, opponent: str | int | None = None,
                        is_home: int | None = None, batting_order: int | None = None,
-                       schedule: pd.DataFrame | None = None) -> dict:
+                       schedule: pd.DataFrame | None = None, opp_starter: str | int | None = None,
+                       as_starter: bool = False) -> dict:
         date = pd.Timestamp(date).normalize()
         match = self.find_player(player)
         ctx = self.resolve_game_context(match.team_id, date, opponent, is_home, schedule)
+        if opp_starter is not None:
+            ctx["opp_sp_id"] = self.find_player(str(opp_starter)).player_id
+            ctx["opp_sp_source"] = "override"
+        if as_starter:
+            ctx["own_sp_id"] = match.player_id
         result: dict = {
             "player": match.name, "player_id": match.player_id, "team": team_label(match.team_id),
             "date": date.strftime("%Y-%m-%d"),
@@ -338,6 +345,7 @@ class Predictor:
             bats = self._hand(match.player_id, "bats")
             result["batting"] = {
                 "opposing_starter": self._pitcher_name(ctx["opp_sp_id"]),
+                "opposing_starter_source": ctx.get("opp_sp_source") if ctx["opp_sp_id"] is not None else None,
                 "opposing_starter_hand": opp_hand,
                 "bats": bats,
                 "platoon_advantage": (None if bats is None or opp_hand is None

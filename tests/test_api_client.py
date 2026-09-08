@@ -75,6 +75,9 @@ def test_parse_umpire_and_game_meta():
     ]}}}
     assert parse_umpire(payload) == {"hp_umpire_id": 484183, "hp_umpire_name": "Pat Hoberg"}
     assert parse_umpire({}) == {"hp_umpire_id": None, "hp_umpire_name": None}
+    # the boxscore endpoint lists officials at the top level
+    box = {"officials": payload["liveData"]["boxscore"]["officials"], "teams": {}}
+    assert parse_umpire(box)["hp_umpire_id"] == 484183
 
 
 def _player(pid, name, batting=None, pitching=None, order=None):

@@ -8,7 +8,8 @@ from pathlib import Path
 import pandas as pd
 
 from ..config import DEFAULT_DATA_DIR
-from .mlb_api import MLBStatsClient, parse_boxscore, parse_boxscore_lineups, parse_schedule, parse_schedule_lineups
+from .mlb_api import (MLBStatsClient, parse_boxscore, parse_boxscore_lineups, parse_schedule, parse_schedule_lineups,
+                      parse_umpire)
 from .statcast import fetch_statcast_range
 from .store import Dataset, empty_lineups, empty_players, normalise
 
@@ -35,6 +36,7 @@ def _fetch_finals(client: MLBStatsClient, sched_rows: list[dict], weather: bool,
         row = dict(g)
         row["home_sp_id"] = starters.get("home_sp_id") or row.get("home_sp_id")
         row["away_sp_id"] = starters.get("away_sp_id") or row.get("away_sp_id")
+        row.update({k: v for k, v in parse_umpire(box).items() if v is not None})  # boxscore carries officials
         if weather:
             try:
                 row.update({k: v for k, v in client.weather(g["game_pk"]).items() if v is not None})
@@ -60,10 +62,11 @@ def _to_dataset(games, batting, pitching, players=None, lineups=None, statcast=N
 
 
 def fetch_statcast(start: _date, end: _date, data_dir: Path, today: _date | None = None,
-                   progress: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+                   progress: bool = True, verbose: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Statcast aggregates between two dates (cached per window under data/raw)."""
     print(f"Fetching Statcast {start} .. {end} ...")
-    bat, pit = fetch_statcast_range(start, end, cache_dir=Path(data_dir) / "raw", today=today, progress=progress)
+    bat, pit = fetch_statcast_range(start, end, cache_dir=Path(data_dir) / "raw", today=today, progress=progress,
+                                    verbose=verbose)
     print(f"  {len(bat)} batter-games, {len(pit)} pitcher-games with Statcast data")
     return bat, pit
 
@@ -124,6 +127,7 @@ def fetch_upcoming(client: MLBStatsClient, start: str, end: str, weather: bool =
         try:
             box = client.boxscore(g["game_pk"], final=False)
             lineups.extend(parse_boxscore_lineups(box, g["game_pk"], g["date"]))
+            g.update({k: v for k, v in parse_umpire(box).items() if v is not None})
         except Exception as exc:  # pragma: no cover - network
             log.debug("no pre-game boxscore for %s: %s", g["game_pk"], exc)
         if weather:

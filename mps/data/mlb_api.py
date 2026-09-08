@@ -167,8 +167,8 @@ def parse_players(payload: dict) -> list[dict]:
 
 
 def parse_umpire(payload: dict) -> dict:
-    """Home-plate umpire from the live feed's officials list (empty until the crew is posted)."""
-    officials = ((payload.get("liveData") or {}).get("boxscore") or {}).get("officials") or []
+    """Home-plate umpire from a boxscore (top-level ``officials``) or a live feed (``liveData.boxscore``)."""
+    officials = payload.get("officials") or ((payload.get("liveData") or {}).get("boxscore") or {}).get("officials") or []
     for o in officials:
         if str(o.get("officialType", "")).lower().startswith("home plate"):
             person = o.get("official") or {}
