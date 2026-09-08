@@ -369,6 +369,7 @@ class Predictor:
             feats = assemble_pitcher_features(spec, self.states, lineups)
             row = self.models.pitcher.predict(feats).iloc[0]
             outs = float(row["outs"])
+            outs_int = int(round(outs))
             result["pitching"] = {
                 "throws": self._hand(match.player_id, "throws"),
                 "form": self.pitcher_form(match.player_id, date),
@@ -376,7 +377,7 @@ class Predictor:
                 "prior": self.player_prior(match.player_id, date, batter=False),
                 "opposing_lineup_lhb_share": _safe_round(feats["opplu_lhb_share"].iloc[0], 2),
                 "expected": {t: round(float(row[t]), 3) for t in PITCHING_TARGETS},
-                "innings_pitched": f"{int(outs // 3)}.{int(round(outs % 3))}",
+                "innings_pitched": f"{outs_int // 3}.{outs_int % 3}",
                 "probabilities": {
                     "quality_start": round(_quality_start_prob(outs, float(row["er"])), 3),
                     "strikeouts_ge6": round(float(sps.poisson.sf(5, max(float(row["so"]), 1e-6))), 3),
