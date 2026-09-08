@@ -307,15 +307,31 @@ def cmd_predict_player(args) -> int:
         print("  Probabilities: " + ", ".join(f"{k} {v:.0%}" for k, v in p["probabilities"].items()))
     if result.get("actual"):
         a = result["actual"]
-        print(f"  --- Actual ({a.get('final_score', 'final')}) ---")
-        if "batting" in a:
-            ab = a["batting"]
-            print(f"  Batted {ab['batting_order']}: {ab['h']}-for-{ab['ab']}, HR {ab['hr']}, RBI {ab['rbi']}, R {ab['r']}, "
-                  f"BB {ab['bb']}, SO {ab['so']}, SB {ab['sb']}, TB {ab['tb']}")
-        if "pitching" in a:
-            ap = a["pitching"]
-            print(f"  Pitched{' (start)' if ap['started'] else ' (relief)'}: IP {ap['innings_pitched']}, H {ap['h']}, "
-                  f"ER {ap['er']}, BB {ap['bb']}, SO {ap['so']}, HR {ap['hr']}, pitches {ap['pitches']}")
+        print(f"  --- Actual ({a.get('final_score', 'final')}) vs expected ---")
+        if "batting" in a and "batting" in result:
+            ab, exp = a["batting"], result["batting"]["expected"]
+            cols = ["ab", "h", "hr", "rbi", "r", "bb", "so", "sb", "tb"]
+            print("  " + f"{'':9}" + "".join(f"{c.upper():>6}" for c in cols))
+            print("  " + f"{'expected':9}" + "".join(f"{exp[c]:6.2f}" for c in cols))
+            print("  " + f"{'actual':9}" + "".join(f"{ab[c]:6d}" for c in cols) + f"   (batted {ab['batting_order']})")
+            probs = result["batting"]["probabilities"]
+            checks = [("hit", ab["h"] >= 1), ("multi_hit", ab["h"] >= 2), ("home_run", ab["hr"] >= 1),
+                      ("rbi", ab["rbi"] >= 1), ("run", ab["r"] >= 1), ("walk", ab["bb"] >= 1),
+                      ("stolen_base", ab["sb"] >= 1), ("strikeout", ab["so"] >= 1)]
+            print("  Outcomes: " + ", ".join(f"{k} {probs[k]:.0%} {'YES' if hit else 'no'}" for k, hit in checks))
+        if "pitching" in a and "pitching" in result:
+            ap, exp = a["pitching"], result["pitching"]["expected"]
+            cols = ["outs", "so", "er", "h", "bb", "hr"]
+            print("  " + f"{'':9}" + "".join(f"{c.upper():>6}" for c in cols) + f"{'IP':>7}")
+            print("  " + f"{'expected':9}" + "".join(f"{exp[c]:6.2f}" for c in cols)
+                  + f"{result['pitching']['innings_pitched']:>7}")
+            print("  " + f"{'actual':9}" + "".join(f"{ap[c]:6d}" for c in cols) + f"{ap['innings_pitched']:>7}"
+                  + f"   ({'start' if ap['started'] else 'relief'}, {ap['pitches']} pitches)")
+            qs = ap["outs"] >= 18 and ap["er"] <= 3
+            pp = result["pitching"]["probabilities"]
+            print(f"  Outcomes: quality_start {pp['quality_start']:.0%} {'YES' if qs else 'no'}, "
+                  f"strikeouts_ge6 {pp['strikeouts_ge6']:.0%} {'YES' if ap['so'] >= 6 else 'no'}, "
+                  f"strikeouts_ge8 {pp['strikeouts_ge8']:.0%} {'YES' if ap['so'] >= 8 else 'no'}")
     elif result["context_source"] == "schedule":
         status = result.get("game_status") or "scheduled"
         print(f"  Actual stats: not stored yet (game status in data: {status}). "
