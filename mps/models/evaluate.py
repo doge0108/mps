@@ -125,7 +125,7 @@ def format_report(report: dict) -> str:
         lines.append("")
     g = report["games"]
     lines += [
-        f"Games ({g['n_test']} games)",
+        f"Games ({g['n_test']} games, bottom-up stack features {'ON' if g.get('stacked') else 'OFF'})",
         f"  accuracy : model {g['accuracy_model']:.3f} | elo {g['accuracy_elo']:.3f} | always-home {g['accuracy_always_home']:.3f}",
         f"  log loss : model {g['log_loss_model']:.4f} | elo {g['log_loss_elo']:.4f} | home-rate {g['log_loss_home_rate']:.4f}",
         f"  brier    : model {g['brier_model']:.4f} | elo {g['brier_elo']:.4f}",
