@@ -31,6 +31,10 @@ def test_predict_player_for_scheduled_game(trained, small_dataset):
     out = pred.predict_player(str(pid), last_game["date"])
     assert out["context_source"] == "schedule"
     assert out["opponent"] is not None
+    # a completed game carries the actual box-score line for grading
+    actual = out["actual"]
+    assert actual["batting"]["h"] == int(lines.iloc[0]["h"]) and actual["batting"]["ab"] == int(lines.iloc[0]["ab"])
+    assert actual["final_score"].startswith(pred.ds.games.pipe(lambda g: __import__("mps.config", fromlist=["team_label"]).team_label(last_game["home_team_id"])))
     exp = out["batting"]["expected"]
     assert 0.2 < exp["h"] < 3 and 0 < exp["hr"] < 1 and 2 < exp["ab"] < 5.5
     probs = out["batting"]["probabilities"]

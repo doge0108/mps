@@ -298,6 +298,31 @@ class Predictor:
                 "top3_used_last_game": int(s["tm_bp_top3_used_last"]),
                 "bullpen_era_r30": _safe_round(s.get("tm_bullpen_era_r30"), 2)}
 
+    def actual_lines(self, player_id: int, game_pk: int | None) -> dict:
+        """Box-score line(s) for a completed game, if stored (used to grade a prediction)."""
+        out: dict = {}
+        if game_pk is None:
+            return out
+        b = self.ds.batting_lines
+        row = b[(b["game_pk"] == game_pk) & (b["player_id"] == player_id)]
+        if len(row):
+            r = row.iloc[0]
+            out["batting"] = {k: int(r[k]) for k in ("pa", "ab", "h", "hr", "rbi", "r", "bb", "so", "sb", "tb")}
+            out["batting"]["batting_order"] = int(r["batting_order"])
+        p = self.ds.pitching_lines
+        row = p[(p["game_pk"] == game_pk) & (p["player_id"] == player_id)]
+        if len(row):
+            r = row.iloc[0]
+            outs = int(r["outs"])
+            out["pitching"] = {**{k: int(r[k]) for k in ("outs", "h", "r", "er", "bb", "so", "hr", "bf", "pitches")},
+                               "innings_pitched": f"{outs // 3}.{outs % 3}", "started": bool(r["is_starter"])}
+        g = self.ds.games[self.ds.games["game_pk"] == game_pk]
+        if len(g) and pd.notna(g.iloc[0]["home_score"]):
+            gg = g.iloc[0]
+            out["final_score"] = f"{team_label(gg['home_team_id'])} {int(gg['home_score'])} - " \
+                                 f"{team_label(gg['away_team_id'])} {int(gg['away_score'])}"
+        return out
+
     # ------------------------------------------------------------ players
     def predict_player(self, player: str, date: str | pd.Timestamp, opponent: str | int | None = None,
                        is_home: int | None = None, batting_order: int | None = None,
@@ -320,6 +345,7 @@ class Predictor:
             "weather": ctx["weather"] if any(v is not None for v in ctx["weather"].values()) else None,
             "umpire": self.umpire_info(ctx["hp_umpire_id"], ctx["hp_umpire_name"], date),
             "opp_bullpen": self.bullpen_status(ctx["opp_team_id"], date),
+            "actual": self.actual_lines(match.player_id, ctx["game_pk"]) or None,
         }
         wx = {c: ctx["weather"].get(c) for c in WEATHER_COLS} | {"hp_umpire_id": ctx["hp_umpire_id"]}
         opp_team = ctx["opp_team_id"] if ctx["opp_team_id"] is not None else -1

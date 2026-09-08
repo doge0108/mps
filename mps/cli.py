@@ -99,7 +99,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _today() -> str:
-    return pd.Timestamp.today().strftime("%Y-%m-%d")
+    """MLB dates games by the US calendar day, so default to the current date in US Eastern time."""
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:  # pragma: no cover - missing tz database
+        now = datetime.now()
+    return now.strftime("%Y-%m-%d")
 
 
 def _live_schedule(date: str) -> pd.DataFrame | None:
@@ -298,8 +305,21 @@ def cmd_predict_player(args) -> int:
         print(f"  Pitching, expected: IP {p['innings_pitched']}, " +
               ", ".join(f"{k.upper()} {v:.2f}" for k, v in p["expected"].items() if k != "outs"))
         print("  Probabilities: " + ", ".join(f"{k} {v:.0%}" for k, v in p["probabilities"].items()))
+    if result.get("actual"):
+        a = result["actual"]
+        print(f"  --- Actual ({a.get('final_score', 'final')}) ---")
+        if "batting" in a:
+            ab = a["batting"]
+            print(f"  Batted {ab['batting_order']}: {ab['h']}-for-{ab['ab']}, HR {ab['hr']}, RBI {ab['rbi']}, R {ab['r']}, "
+                  f"BB {ab['bb']}, SO {ab['so']}, SB {ab['sb']}, TB {ab['tb']}")
+        if "pitching" in a:
+            ap = a["pitching"]
+            print(f"  Pitched{' (start)' if ap['started'] else ' (relief)'}: IP {ap['innings_pitched']}, H {ap['h']}, "
+                  f"ER {ap['er']}, BB {ap['bb']}, SO {ap['so']}, HR {ap['hr']}, pitches {ap['pitches']}")
     if result["context_source"] == "unknown":
         print("  note: no game found for this date; run `mps update`, or pass --opponent / --live for matchup-aware predictions.")
+    if args.date is None:
+        print(f"  (date defaulted to {date}, the current MLB calendar day in US Eastern time; pass --date to change)")
     return 0
 
 
