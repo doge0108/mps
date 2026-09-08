@@ -358,6 +358,8 @@ class Predictor:
                 },
             }
         if match.is_pitcher:
+            own_sp = ctx.get("own_sp_id")
+            probable = own_sp is None or int(own_sp) == match.player_id
             key = -1
             lineups = None
             if ctx["opp_team_id"] is not None:
@@ -371,6 +373,8 @@ class Predictor:
             outs = float(row["outs"])
             outs_int = int(round(outs))
             result["pitching"] = {
+                "probable_starter": probable,
+                "listed_starter": None if probable else self._pitcher_name(own_sp),
                 "throws": self._hand(match.player_id, "throws"),
                 "form": self.pitcher_form(match.player_id, date),
                 "stuff": self.pitcher_stuff(match.player_id, date),
@@ -452,6 +456,9 @@ def _safe_round(x, nd: int = 3):
 
 def _weather_text(g: dict) -> str:
     parts = []
+    dn = g.get("day_night")
+    if dn is not None and not pd.isna(dn):
+        parts.append(f"{dn} game")
     if g.get("temp_f") is not None and not pd.isna(g.get("temp_f")):
         parts.append(f"{int(g['temp_f'])}F")
     wd = g.get("wind_dir")
@@ -461,6 +468,8 @@ def _weather_text(g: dict) -> str:
     cond = g.get("condition")
     if cond is not None and not pd.isna(cond):
         parts.append(str(cond))
+    if len(parts) <= 1 and (g.get("temp_f") is None or pd.isna(g.get("temp_f"))):
+        parts.append("forecast not available yet")
     return ", ".join(parts)
 
 

@@ -47,6 +47,16 @@ def test_predict_pitcher_and_unknown_context(trained, small_dataset):
     out = pred.predict_player(str(int(sp["player_id"])), future)
     assert out["context_source"] == "unknown"
     assert 5 < out["pitching"]["expected"]["outs"] < 27
+    assert out["pitching"]["probable_starter"] is True  # nobody else is listed
+    # a scheduled game with a different probable starter is flagged
+    g = small_dataset.games.sort_values("date").iloc[-1]
+    other = small_dataset.pitching_lines[(small_dataset.pitching_lines["is_starter"] == 1)
+                                         & (small_dataset.pitching_lines["team_id"] == g["home_team_id"])
+                                         & (small_dataset.pitching_lines["player_id"] != g["home_sp_id"])].iloc[-1]
+    out3 = pred.predict_player(str(int(other["player_id"])), g["date"])
+    assert out3["pitching"]["probable_starter"] is False and out3["pitching"]["listed_starter"] is not None
+    from mps.predict import _weather_text
+    assert _weather_text({"day_night": "night", "temp_f": None}) == "night game, forecast not available yet"
     # with an explicit opponent the context becomes manual and a probable starter is guessed
     opp = int(sp["opp_team_id"])
     out2 = pred.predict_player(str(int(sp["player_id"])), future, opponent=opp)
