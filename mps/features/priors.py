@@ -38,7 +38,7 @@ def _age_factor(age: float | np.ndarray, batter: bool) -> np.ndarray:
 
 
 def _season_totals(lines: pd.DataFrame, games: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    seasons = games.set_index("game_pk")["season"]
+    seasons = games.drop_duplicates("game_pk").set_index("game_pk")["season"]
     df = lines.assign(season=lines["game_pk"].map(seasons).astype("Int64")).dropna(subset=["season"])
     df["season"] = df["season"].astype(int)
     return df.groupby(["player_id", "season"], sort=False)[cols].sum().reset_index()

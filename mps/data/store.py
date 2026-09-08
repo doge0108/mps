@@ -100,7 +100,9 @@ def normalise(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     for col in ("temp_f", "wind_mph"):
         games[col] = pd.to_numeric(games[col], errors="coerce").astype("float64")
     games["hp_umpire_id"] = pd.to_numeric(games["hp_umpire_id"], errors="coerce").astype("Int64")
-    games = games.sort_values(["date", "game_pk"]).reset_index(drop=True)
+    # the schedule endpoint can list one game under two dates (suspended / resumed games):
+    # keep a single row per game, preferring the later (completed) listing
+    games = games.sort_values(["date", "game_pk"]).drop_duplicates("game_pk", keep="last").reset_index(drop=True)
 
     bat = frames["batting_lines"].copy()
     for col in ("game_pk", "date", "player_id", "player_name", "team_id", "opp_team_id", "is_home",
@@ -114,7 +116,8 @@ def normalise(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     for col in BATTING_STATS:
         if col in bat.columns:
             bat[col] = pd.to_numeric(bat[col], errors="coerce").astype("float64")
-    bat = bat.sort_values(["date", "game_pk", "player_id"]).reset_index(drop=True)
+    bat = bat.sort_values(["date", "game_pk", "player_id"]).drop_duplicates(["game_pk", "player_id"], keep="last") \
+        .reset_index(drop=True)
 
     pit = frames["pitching_lines"].copy()
     for col in ("game_pk", "date", "player_id", "player_name", "team_id", "opp_team_id", "is_home",
@@ -125,7 +128,8 @@ def normalise(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     for col in PITCHING_STATS:
         if col in pit.columns:
             pit[col] = pd.to_numeric(pit[col], errors="coerce").astype("float64")
-    pit = pit.sort_values(["date", "game_pk", "player_id"]).reset_index(drop=True)
+    pit = pit.sort_values(["date", "game_pk", "player_id"]).drop_duplicates(["game_pk", "player_id"], keep="last") \
+        .reset_index(drop=True)
 
     players = frames.get("players")
     players = empty_players() if players is None or players.empty else players.copy()
@@ -146,7 +150,8 @@ def normalise(frames: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
         lineups["date"] = pd.to_datetime(lineups["date"]).dt.normalize()
         for col in ("game_pk", "team_id", "player_id", "batting_order"):
             lineups[col] = pd.to_numeric(lineups[col], errors="coerce").astype("int64")
-        lineups = lineups.sort_values(["date", "game_pk", "team_id", "batting_order"]).reset_index(drop=True)
+        lineups = lineups.sort_values(["date", "game_pk", "team_id", "batting_order"]) \
+            .drop_duplicates(["game_pk", "player_id"], keep="last").reset_index(drop=True)
     sc_bat = _normalise_statcast(frames.get("statcast_batting"), STATCAST_BATTING_COLUMNS)
     sc_pit = _normalise_statcast(frames.get("statcast_pitching"), STATCAST_PITCHING_COLUMNS)
     return {"games": games, "batting_lines": bat, "pitching_lines": pit, "players": players, "lineups": lineups,
@@ -166,4 +171,5 @@ def _normalise_statcast(df: pd.DataFrame | None, cols: list[str]) -> pd.DataFram
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
     df["game_pk"] = df["game_pk"].astype("int64")
     df["player_id"] = df["player_id"].astype("int64")
-    return df[cols].sort_values(["date", "game_pk", "player_id"]).reset_index(drop=True)
+    return df[cols].sort_values(["date", "game_pk", "player_id"]).drop_duplicates(["game_pk", "player_id"], keep="last") \
+        .reset_index(drop=True)

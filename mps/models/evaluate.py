@@ -18,7 +18,7 @@ from .player_model import make_batter_model, make_pitcher_model
 
 
 def _split_by_season(feats: pd.DataFrame, ds: Dataset, test_season: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    seasons = ds.games.set_index("game_pk")["season"]
+    seasons = ds.games.drop_duplicates("game_pk").set_index("game_pk")["season"]
     s = feats["game_pk"].map(seasons).astype("Int64")
     return feats[s < test_season].reset_index(drop=True), feats[s == test_season].reset_index(drop=True)
 

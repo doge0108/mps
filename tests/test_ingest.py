@@ -110,3 +110,31 @@ def test_update_adds_new_finals_and_upcoming_games_with_lineups(small_dataset, t
     assert len(again.played_games()) == len(ds.games)
     assert set(again.upcoming_games()["game_pk"]) == {888001}
     assert len(again.lineups) == 18
+
+
+def test_duplicate_schedule_listing_is_collapsed(small_dataset, tmp_path, statcast_via_client):
+    """A suspended game shows up under two dates in the schedule; it must be stored once and train cleanly."""
+    from mps.models.registry import train_all
+    ds = small_dataset
+    today = date(2024, 5, 15)
+
+    class DupClient(FakeClient):
+        def schedule(self, start_date, end_date, game_types=("R",), with_lineups=False):
+            payload = super().schedule(start_date, end_date, game_types, with_lineups)
+            days = payload["dates"]
+            if len(days) >= 2 and days[0]["games"]:
+                first = dict(days[0]["games"][0])
+                first["officialDate"] = days[1]["date"]      # listed again on the next day
+                days[1]["games"].append(first)
+            return payload
+
+    client = DupClient(ds, today=today)
+    statcast_via_client["client"] = client
+    got = fetch_seasons([2024], tmp_path / "data", client=client)
+    assert got.games["game_pk"].is_unique
+    assert not got.batting_lines.duplicated(["game_pk", "player_id"]).any()
+    dup_pk = got.games.sort_values("date")["game_pk"].iloc[0]
+    # the later listing wins, so the game's date is the resumed date
+    assert (got.games["game_pk"] == dup_pk).sum() == 1
+    bundle = train_all(got, max_rounds=5, verbose=False)   # one season only: no priors, still trains
+    assert set(bundle.batter.boosters) >= {"h", "hr"}
